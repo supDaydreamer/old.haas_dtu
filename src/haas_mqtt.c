@@ -683,6 +683,16 @@ sprintf(s_data,"{");
 		}
 		len += len1;
 	}
+
+	// 附加设备数量字段 NUM，表示有效设备数
+	if (haas_device_num > 0) {
+		len1 = snprintf(s_data + len, sizeof(s_data) - len,
+		                "\t\"NUM\": %d,\r\n", haas_device_num);
+		if (len1 < 0) {
+			len1 = 0;
+		}
+		len += len1;
+	}
 }
 if (g_energy_window_value_ready) {
 	int dev_idx = haas_device_num;
