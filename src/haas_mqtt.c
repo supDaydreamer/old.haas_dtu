@@ -641,6 +641,7 @@ len +=1;
 for(int i =0;i<haas_device_num;i++)
 {
 	HAAS_DEV_RS485 *dev = &g_haas_dev_rs485[i];
+	uint8_t dev_add = dev->dev_add;
 	if(i<9)
 	{
 		if (dev->is_string) {
@@ -665,6 +666,21 @@ for(int i =0;i<haas_device_num;i++)
 		len1 = 0;
 	}
 	len += len1;
+
+	// 追加设备地址字段，便于区分从机：ID01..IDxx
+	if (i < 99) {
+		if (i < 9) {
+			len1 = snprintf(s_data + len, sizeof(s_data) - len,
+			                "\t\"ID0%d\": %u,\r\n", i + 1, dev_add);
+		} else {
+			len1 = snprintf(s_data + len, sizeof(s_data) - len,
+			                "\t\"ID%d\": %u,\r\n", i + 1, dev_add);
+		}
+		if (len1 < 0) {
+			len1 = 0;
+		}
+		len += len1;
+	}
 }
 if (g_energy_window_value_ready) {
 	int dev_idx = haas_device_num;
