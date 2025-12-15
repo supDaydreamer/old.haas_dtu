@@ -711,6 +711,7 @@ sprintf(s_data,"{");
 		len += len1;
 	}
 }
+
 if (g_energy_window_value_ready) {
 	int dev_idx = haas_device_num;
 	int dev_num = dev_idx + 1;
