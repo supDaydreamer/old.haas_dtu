@@ -2002,9 +2002,9 @@ printf("uart1 send data is:");
 		s_send_data[7] = crc >> 8;
 		
 		// 发送数据
-		printf("Device[%d] Modbus CMD=0x%02X: ", i+1, g_haas_dev_rs485[i].cmd);
+		printf("Device[%d] Modbus CMD=0x%02X (uart%u): ", i+1, g_haas_dev_rs485[i].cmd, tx_uart);
 		uart_tx(tx_uart, s_send_data, 8);
-		printf("uart2 send data is:");
+		printf("uart%u send data is:", tx_uart);
 		for(int j=0; j<8; j++) 
 		{
 			printf("%02X ", s_send_data[j]);
