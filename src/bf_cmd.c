@@ -803,7 +803,7 @@ void *cmd_main(void *args)
 		if (RS485_type == 1) {
 			haas_data_detect();
 			sleep(1);
-		} else if (dev_type == 2) {
+		} else if (dev_type == 3) {
 			haas_energy_type2_init();
 			static bool s_full_read_done = false;
 			if (!s_full_read_done) {
@@ -826,7 +826,7 @@ void *cmd_main(void *args)
 		DATA_FUNCTION_INTERVAL_S = GetIniKeyInt("config", "upload_time", FILENAME);
 		printf("upload data interval:%d\r\n",DATA_FUNCTION_INTERVAL_S);
 		if (now_time - s_cmd_last_run_time >= DATA_FUNCTION_INTERVAL_S){
-			if (dev_type == 2) {
+			if (dev_type == 3) {
 				haas_energy_type2_full_read();
 				sleep(1);
 			}

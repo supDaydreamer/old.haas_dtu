@@ -44,7 +44,7 @@ static char set_ThreePrase_cmd[] = {};
 //static char read_measure_data_cmd[] = {0xFF,0x03,0x15,0x00,0x00,0x18,0x54,0x12};
 static char read_measure_data_cmd[] = {0x05,0x03,0x15,0x00,0x00,0x1A,0xC1,0x89};
 
-// Pre-built frames for energy-meter initialization when dev_type == 2/////////////////////////////////////////////////////////
+// Pre-built frames for energy-meter initialization when dev_type == 3/////////////////////////////////////////////////////////
 static const uint8_t kEnergyInitBaud9600[]   = {0xFF,0x10,0x10,0x11,0x00,0x01,0x02,0x00,0x01,0x3D,0x74};
 static const uint8_t kEnergyInitVoltGain[]   = {0xFF,0x10,0x10,0x12,0x00,0x02,0x04,0x3F,0x80,0x00,0x00,0x84,0xAD};
 static const uint8_t kEnergyInitCurrGain[]   = {0xFF,0x10,0x10,0x14,0x00,0x02,0x04,0x3F,0x80,0x00,0x00,0x04,0x87};
@@ -749,7 +749,7 @@ void on_uart_2_read(uint8_t *data, size_t len)
 	uart_rx_publish(2, store_buf(data, len));
 	extern uint8_t RS485_type;
     extern uint8_t dev_type;
-if (RS485_type == 1 || dev_type == 2) {
+if (RS485_type == 1 || dev_type == 3) {
 		if (RS485_type == 1) {
 			/* 如果收到目标序列的前10字节，则发送指定响应 10 次，每次间隔 50ms
 			 * 触发序列（前10字节）：03 10 00 00 00 06 0C 4D 4F 32
