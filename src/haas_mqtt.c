@@ -637,15 +637,17 @@ snprintf(s_topic_buf, sizeof(s_topic_buf), "/%d/%s/property/post",product_ID,g_b
 int len = 0;
 int len1 = 0;
 sprintf(s_data,"{");
-len +=1;
-for(int i =0;i<haas_device_num;i++)
-{
-	HAAS_DEV_RS485 *dev = &g_haas_dev_rs485[i];
-	uint8_t dev_add = dev->dev_add;
-	if(i<9)
+	len +=1;
+	for(int i =0;i<haas_device_num;i++)
 	{
-		if (dev->is_string) {
-			len1 = snprintf(s_data + len, sizeof(s_data) - len,
+		HAAS_DEV_RS485 *dev = &g_haas_dev_rs485[i];
+		extern uint8_t dev_type;
+		bool should_append_id = (dev_type == 2);  // 仅空调设备上报从机地址
+		uint8_t dev_add = dev->dev_add;
+		if(i<9)
+		{
+			if (dev->is_string) {
+				len1 = snprintf(s_data + len, sizeof(s_data) - len,
 			                "\t\"V0%d\": \"%s\",\r\n", i + 1, dev->value_text);
 		} else {
 			len1 = snprintf(s_data + len, sizeof(s_data) - len,
@@ -662,17 +664,17 @@ for(int i =0;i<haas_device_num;i++)
 			                "\t\"V%d\": %.1f,\r\n", i + 1, dev->value2);
 		}
 	}
-	if (len1 < 0) {
-		len1 = 0;
-	}
-	len += len1;
+		if (len1 < 0) {
+			len1 = 0;
+		}
+		len += len1;
 
-	// 追加设备地址字段，便于区分从机：ID01..IDxx
-	if (i < 99) {
-		if (i < 9) {
-			len1 = snprintf(s_data + len, sizeof(s_data) - len,
-			                "\t\"ID0%d\": %u,\r\n", i + 1, dev_add);
-		} else {
+		// 追加设备地址字段，便于区分从机：ID01..IDxx
+		if (should_append_id && i < 99) {
+			if (i < 9) {
+				len1 = snprintf(s_data + len, sizeof(s_data) - len,
+				                "\t\"ID0%d\": %u,\r\n", i + 1, dev_add);
+			} else {
 			len1 = snprintf(s_data + len, sizeof(s_data) - len,
 			                "\t\"ID%d\": %u,\r\n", i + 1, dev_add);
 		}
