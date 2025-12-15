@@ -1,0 +1,8 @@
+{
+    "cmake.sourceDirectory": "/home/zzzhy/project/mt7628/haas_dtu_11_28/src/lib/paho.mqtt.embedded-c",
+    "makefile.configureOnOpen": false,
+    "files.associations": {
+        "system.h": "c"
+    },
+    "idf.pythonInstallPath": "/home/zzzhy/.espressif/python_env/idf5.2_py3.14_env/bin/python"
+}
