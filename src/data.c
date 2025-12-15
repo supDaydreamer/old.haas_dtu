@@ -2049,11 +2049,16 @@ printf("uart1 send data is:");
 		g_haas_dev_rs485[i].index = i+1;
 
 		uint8_t tx_uart = (dev_type == 2) ? 1 : 2;
-		if (tx_uart >= 1 && tx_uart <= 2 && s_uart_control_pending[tx_uart]) {
-			dbg_printf("[Modbus Poll] uart%u control pending, skip dev%02d this round\n", tx_uart, i + 1);
-			continue;
+		bool locked = false;
+		for (int retry = 0; retry < 10; retry++) {
+			if (tx_uart >= 1 && tx_uart <= 2 && s_uart_control_pending[tx_uart]) {
+				usleep(50 * 1000);
+				continue;
+			}
+			locked = uart_channel_try_lock(tx_uart);
+			if (locked) break;
+			usleep(50 * 1000);
 		}
-		bool locked = uart_channel_try_lock(tx_uart);
 		if (!locked) {
 			dbg_printf("[Modbus Poll] uart%u busy, skip dev%02d this round\n", tx_uart, i + 1);
 			continue;
