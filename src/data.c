@@ -1203,18 +1203,12 @@ void on_uart_1_read(uint8_t *data, size_t len)
 {
 	uart_rx_publish(1, store_buf(data, len));
 	
-	// 如果配置为监测模式，则处理Modbus数据
-	// RS485_type == 1 表示被动监测
-	extern uint8_t RS485_type;
-	if (RS485_type == 1) {
-		process_modbus_sniffer_data(1, data, len);
-	} else {
-		uart_receive_buff_input(data, len);
-		printf("on_uart_1_read len=%zu data:", len);
-		for (size_t i = 0; i < len; i++) {
-			printf(" %02X", data[i]);
-		}
-		printf("\r\n");
+	// 统一走 Modbus 解析，便于主动轮询响应进入 store_register_data
+	process_modbus_sniffer_data(1, data, len);
+
+	// 保留旧逻辑：非 dev_type==2 场景继续走 haas_device_dataRead
+	extern uint8_t dev_type;
+	if (dev_type != 2) {
 		haas_device_dataRead(data);
 	}
 }
@@ -1990,8 +1984,8 @@ printf("uart1 send data is:");
 	{
 		device_no = i+1;
 		g_haas_dev_rs485[i].index = i+1;
-		
 
+		uint8_t tx_uart = (dev_type == 2) ? 1 : 2;
 		
 		// 根据cmd字段动态构建Modbus数据包
 		uint8_t s_send_data[8] = {0};
@@ -2009,7 +2003,7 @@ printf("uart1 send data is:");
 		
 		// 发送数据
 		printf("Device[%d] Modbus CMD=0x%02X: ", i+1, g_haas_dev_rs485[i].cmd);
-		uart_tx(2, s_send_data, 8);
+		uart_tx(tx_uart, s_send_data, 8);
 		printf("uart2 send data is:");
 		for(int j=0; j<8; j++) 
 		{
