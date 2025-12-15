@@ -638,6 +638,10 @@ int len = 0;
 int len1 = 0;
 sprintf(s_data,"{");
 	len +=1;
+	// 统计唯一设备地址数量
+	uint8_t unique_ids[50] = {0};
+	int unique_count = 0;
+
 	for(int i =0;i<haas_device_num;i++)
 	{
 		HAAS_DEV_RS485 *dev = &g_haas_dev_rs485[i];
@@ -682,12 +686,24 @@ sprintf(s_data,"{");
 			len1 = 0;
 		}
 		len += len1;
+
+		// 记录唯一地址
+		bool seen = false;
+		for (int u = 0; u < unique_count; u++) {
+			if (unique_ids[u] == dev_add) {
+				seen = true;
+				break;
+			}
+		}
+		if (!seen && unique_count < (int)(sizeof(unique_ids))) {
+			unique_ids[unique_count++] = dev_add;
+		}
 	}
 
 	// 附加设备数量字段 NUM，表示有效设备数
-	if (haas_device_num > 0) {
+	if (unique_count > 0) {
 		len1 = snprintf(s_data + len, sizeof(s_data) - len,
-		                "\t\"NUM\": %d,\r\n", haas_device_num);
+		                "\t\"NUM\": %d,\r\n", unique_count);
 		if (len1 < 0) {
 			len1 = 0;
 		}
