@@ -2011,6 +2011,18 @@ printf("uart1 send data is:");
 		}
 		printf("\r\n");
 		
+		// 记录待匹配请求，便于响应进入 store_register_data
+		ModbusRequest req = {
+			.slave_addr = g_haas_dev_rs485[i].dev_add,
+			.function_code = g_haas_dev_rs485[i].cmd,
+			.channel = tx_uart,
+			.start_reg = g_haas_dev_rs485[i].reg_add,
+			.reg_count = (g_haas_dev_rs485[i].data_len == 0) ? 1 : g_haas_dev_rs485[i].data_len,
+			.timestamp = time(NULL),
+			.is_valid = true
+		};
+		add_pending_request(&req);
+		
 		// 等待响应
 		time_t now_time = time(NULL);
 		s_haas_data_send_time = now_time;
