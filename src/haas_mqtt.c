@@ -673,21 +673,7 @@ sprintf(s_data,"{");
 		}
 		len += len1;
 
-		// 追加设备地址字段，便于区分从机：ID01..IDxx
-		if (should_append_id && i < 99) {
-			if (i < 9) {
-				len1 = snprintf(s_data + len, sizeof(s_data) - len,
-				                "\t\"ID0%d\": %u,\r\n", i + 1, dev_add);
-			} else {
-			len1 = snprintf(s_data + len, sizeof(s_data) - len,
-			                "\t\"ID%d\": %u,\r\n", i + 1, dev_add);
-		}
-		if (len1 < 0) {
-			len1 = 0;
-		}
-		len += len1;
-
-		// 记录唯一地址
+		// 记录唯一地址并按首次出现追加 IDxx
 		bool seen = false;
 		for (int u = 0; u < unique_count; u++) {
 			if (unique_ids[u] == dev_add) {
@@ -696,7 +682,22 @@ sprintf(s_data,"{");
 			}
 		}
 		if (!seen && unique_count < (int)(sizeof(unique_ids))) {
-			unique_ids[unique_count++] = dev_add;
+			unique_ids[unique_count] = dev_add;
+			if (should_append_id && unique_count < 99) {
+				int id_idx = unique_count + 1;  // 从1开始
+				if (id_idx < 10) {
+					len1 = snprintf(s_data + len, sizeof(s_data) - len,
+					                "\t\"ID0%d\": %u,\r\n", id_idx, dev_add);
+				} else {
+					len1 = snprintf(s_data + len, sizeof(s_data) - len,
+					                "\t\"ID%d\": %u,\r\n", id_idx, dev_add);
+				}
+				if (len1 < 0) {
+					len1 = 0;
+				}
+				len += len1;
+			}
+			unique_count++;
 		}
 	}
 
