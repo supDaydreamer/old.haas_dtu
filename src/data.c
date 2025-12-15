@@ -1947,6 +1947,9 @@ void haas_data_read(void)
 	uint8_t *send_data_p = NULL;
 	size_t send_data_len = 0;
 	device_no = 0;
+
+	ensure_register_map_initialized();
+	cleanup_timeout_requests();
  
 #if 0
 		
