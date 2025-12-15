@@ -1043,6 +1043,66 @@ void haas_device_control(uint8_t device_type,
 		dbg_printf("\n");
 		break;
 	}
+	case 3: {  // 恒湿机设备：功能码0x06，开关机/设湿度/强制模式
+		uint16_t target_reg = reg_addr;
+		if (reg_addr == 0) target_reg = 0x0000;
+		else if (reg_addr == 1) target_reg = 0x0001;
+
+		bool ready = true;
+		uint16_t payload_data = data;
+		switch (target_reg) {
+		case 0x0000:  // 0x0001 开机，0x0000 关机；兼容 data=1/0
+			if (data == 1 || data == 0x0001) {
+				payload_data = 0x0001;
+			} else if (data == 0) {
+				payload_data = 0x0000;
+			} else {
+				dbg_printf("[HAAS_CTRL] invalid humi power value: %u (expect 0/1)\n", data);
+				ready = false;
+			}
+			break;
+		case 0x0001:  // 设定湿度 10~95 (%RH)
+			if (data < 10 || data > 95) {
+				dbg_printf("[HAAS_CTRL] invalid humi setpoint: %u (expect 10-95)\n", data);
+				ready = false;
+			}
+			break;
+		case 0x0012:  // 强制控制：0自动 1除湿 2加湿
+			if (data > 2) {
+				dbg_printf("[HAAS_CTRL] invalid humi force mode: %u (expect 0/1/2)\n", data);
+				ready = false;
+			}
+			break;
+		default:
+			dbg_printf("[HAAS_CTRL] invalid reg_addr for device_type 3: 0x%X\n", reg_addr);
+			ready = false;
+			break;
+		}
+
+		if (!ready) {
+			break;
+		}
+
+		static uint8_t frame[8];
+		frame[0] = slave_addr;
+		frame[1] = 0x06;
+		frame[2] = (target_reg >> 8) & 0xFF;
+		frame[3] = target_reg & 0xFF;
+		frame[4] = (payload_data >> 8) & 0xFF;
+		frame[5] = payload_data & 0xFF;
+
+		uint16_t crc = ModbusCrc(frame, 6);
+		frame[6] = crc & 0xFF;
+		frame[7] = (crc >> 8) & 0xFF;
+
+		uart_tx(uartx, frame, sizeof(frame));
+		dbg_printf("[HAAS_CTRL] humi reg:0x%04X data:%u uart:%u tx:", target_reg, payload_data, uartx);
+		for (size_t i = 0; i < sizeof(frame); i++) {
+			dbg_printf(" %02X", frame[i]);
+		}
+		dbg_printf("\n");
+		break;
+	}
 	default:
 		dbg_printf("[HAAS_CTRL] unsupported device_type: %u\n", device_type);
 		break;
