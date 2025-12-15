@@ -371,6 +371,40 @@ static bool s_waiting_haas_config = false;
 static bool s_waiting_haas_sync_time = false;
 //static bool s_waiting_haas_upload_data = false;
 
+// UART占用标志，用于简单模拟“中断”排他，防止控制与轮询互相干扰
+static volatile bool s_uart_busy[3] = {false, false, false};  // 仅使用索引1/2
+static time_t s_uart_busy_since[3] = {0};
+static volatile bool s_uart_control_pending[3] = {false, false, false};
+
+static bool uart_channel_try_lock(uint8_t uart)
+{
+	if (uart < 1 || uart > 2) {
+		return true;  // 超出范围直接视为不加锁
+	}
+
+	time_t now = time(NULL);
+	if (s_uart_busy[uart]) {
+		// 超时保护，避免锁被卡死
+		if (now - s_uart_busy_since[uart] > 5) {
+			s_uart_busy[uart] = false;
+		} else {
+			return false;
+		}
+	}
+
+	s_uart_busy[uart] = true;
+	s_uart_busy_since[uart] = now;
+	return true;
+}
+
+static void uart_channel_unlock(uint8_t uart)
+{
+	if (uart < 1 || uart > 2) {
+		return;
+	}
+	s_uart_busy[uart] = false;
+}
+
 //read haas device command
 
 const char read_haas_th_cmd[] = {0x05,0x03,0x10,0x00,0x00,0x04,0x41,0x4d};
@@ -919,6 +953,27 @@ void haas_device_control(uint8_t device_type,
                          uint16_t data,
                          uint32_t uartx)
 {
+	uint8_t uart_channel = (uartx == 0) ? 1 : (uint8_t)uartx;
+	if (uart_channel >= 1 && uart_channel <= 2) {
+		s_uart_control_pending[uart_channel] = true;
+	}
+
+	bool locked = uart_channel_try_lock(uart_channel);
+	if (!locked) {
+		// 等待一小段时间尝试抢占
+		for (int retry = 0; retry < 5 && !locked; retry++) {
+			usleep(50 * 1000);
+			locked = uart_channel_try_lock(uart_channel);
+		}
+		if (!locked) {
+			dbg_printf("[HAAS_CTRL] uart%u busy, skip control\n", uart_channel);
+			if (uart_channel >= 1 && uart_channel <= 2) {
+				s_uart_control_pending[uart_channel] = false;
+			}
+			return;
+		}
+	}
+
 	switch (device_type) {
 	case 1: {  // 开关量设备
 		if (reg_addr <= 3) {
@@ -1106,6 +1161,11 @@ void haas_device_control(uint8_t device_type,
 	default:
 		dbg_printf("[HAAS_CTRL] unsupported device_type: %u\n", device_type);
 		break;
+	}
+
+	uart_channel_unlock(uart_channel);
+	if (uart_channel >= 1 && uart_channel <= 2) {
+		s_uart_control_pending[uart_channel] = false;
 	}
 }
 
@@ -1989,6 +2049,15 @@ printf("uart1 send data is:");
 		g_haas_dev_rs485[i].index = i+1;
 
 		uint8_t tx_uart = (dev_type == 2) ? 1 : 2;
+		if (tx_uart >= 1 && tx_uart <= 2 && s_uart_control_pending[tx_uart]) {
+			dbg_printf("[Modbus Poll] uart%u control pending, skip dev%02d this round\n", tx_uart, i + 1);
+			continue;
+		}
+		bool locked = uart_channel_try_lock(tx_uart);
+		if (!locked) {
+			dbg_printf("[Modbus Poll] uart%u busy, skip dev%02d this round\n", tx_uart, i + 1);
+			continue;
+		}
 		
 		// 根据cmd字段动态构建Modbus数据包
 		uint8_t s_send_data[8] = {0};
@@ -2033,10 +2102,17 @@ printf("uart1 send data is:");
 		while(s_waiting_haas_th) 
 		{
 			time_t now_time = time(NULL);
+			if (tx_uart >= 1 && tx_uart <= 2 && s_uart_control_pending[tx_uart]) {
+				dbg_printf("[Modbus Poll] uart%u interrupted by control, exit wait\n", tx_uart);
+				s_waiting_haas_th = false;
+				break;
+			}
 			if (now_time - s_haas_data_send_time >= 3) {
 				s_waiting_haas_th = false;
 			}
 		}
+
+		uart_channel_unlock(tx_uart);
 //	}
 
 	//sleep(2);
