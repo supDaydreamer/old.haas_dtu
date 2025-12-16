@@ -1450,6 +1450,20 @@ static bool parse_modbus_request(uint8_t *data, size_t len, ModbusRequest *req)
  */
 static void add_pending_request(ModbusRequest *req)
 {
+	// 先查找是否已有同通道+从站+功能码的待处理请求，若有则直接覆盖为最新的请求，
+	// 避免同一地址/功能码出现多个未匹配项导致响应错配
+	for (int i = 0; i < MAX_PENDING_REQUESTS; i++) {
+		if (g_pending_requests[i].is_valid &&
+		    g_pending_requests[i].channel == req->channel &&
+		    g_pending_requests[i].slave_addr == req->slave_addr &&
+		    g_pending_requests[i].function_code == req->function_code) {
+			memcpy(&g_pending_requests[i], req, sizeof(ModbusRequest));
+			dbg_printf("[Modbus Monitor] Replace pending at slot %d (ch%u addr:%02X func:%02X)\n",
+			           i, req->channel, req->slave_addr, req->function_code);
+			return;
+		}
+	}
+
 	// 查找空闲位置
 	for (int i = 0; i < MAX_PENDING_REQUESTS; i++) {
 		if (!g_pending_requests[i].is_valid) {
@@ -1488,15 +1502,19 @@ static void cleanup_timeout_requests(void)
  */
 static ModbusRequest* match_response_with_request(uint8_t channel, uint8_t slave_addr, uint8_t function_code)
 {
+	ModbusRequest *candidate = NULL;
+
 	for (int i = 0; i < MAX_PENDING_REQUESTS; i++) {
 		if (g_pending_requests[i].is_valid &&
 		    g_pending_requests[i].channel == channel &&
 		    g_pending_requests[i].slave_addr == slave_addr &&
 		    g_pending_requests[i].function_code == function_code) {
-			return &g_pending_requests[i];
+			if (candidate == NULL || g_pending_requests[i].timestamp > candidate->timestamp) {
+				candidate = &g_pending_requests[i];
+			}
 		}
 	}
-	return NULL;
+	return candidate;
 }
 
 /**
