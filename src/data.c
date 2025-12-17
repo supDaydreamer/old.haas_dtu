@@ -78,6 +78,12 @@ static const uint16_t kEnergyFullReadStartReg = 0x1100;
 static const uint16_t kEnergyFullReadRegCount = 0x0012;
 // 固定全读帧：从0x1100开始读18个寄存器，addr=0x0A，功能码0x03，CRC=0xC1 0x80（低字节在前）
 static const uint8_t kEnergyFullReadFrame[] = {0x0A, 0x03, 0x11, 0x00, 0x00, 0x12, 0xC1, 0x80};
+static const uint8_t kEnergyFaultReadSlaveAddr = 0x01;
+static const uint8_t kEnergyFaultReadFunc = 0x03;
+static const uint16_t kEnergyFaultReadStartReg = 0x0008;
+static const uint16_t kEnergyFaultReadRegCount = 0x0001;
+// 恒湿机故障读取：读寄存器0x0008，功能码0x03，CRC=0x05 0xC8（低字节在前）
+static const uint8_t kEnergyFaultReadFrame[] = {0x01, 0x03, 0x00, 0x08, 0x00, 0x01, 0x05, 0xC8};
 // 恒湿机控制：自动调湿模式与目标湿度45%，并开机
 static const uint8_t kHumiAutoModeFrame[] = {0x01, 0x06, 0x00, 0x12, 0x00, 0x00, 0x29, 0xCF};
 static const uint8_t kHumiSetpoint45Frame[] = {0x01, 0x06, 0x00, 0x01, 0x00, 0x2D, 0x18, 0x17};
@@ -272,6 +278,21 @@ void haas_energy_type2_full_read(void)
 		.is_valid = true
 	};
 	add_pending_request(&req);
+
+	// 读取恒湿机故障寄存器，避免与全读响应抢占，增加间隔
+	sleep(1);
+	uart_tx(2, (uint8_t *)kEnergyFaultReadFrame, sizeof(kEnergyFaultReadFrame));
+
+	ModbusRequest fault_req = {
+		.slave_addr = kEnergyFaultReadSlaveAddr,
+		.function_code = kEnergyFaultReadFunc,
+		.channel = 2,
+		.start_reg = kEnergyFaultReadStartReg,
+		.reg_count = kEnergyFaultReadRegCount,
+		.timestamp = time(NULL),
+		.is_valid = true
+	};
+	add_pending_request(&fault_req);
 }
 
 void haas_energy_type2_clear_energy(void)
