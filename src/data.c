@@ -782,47 +782,38 @@ void on_uart_2_read(uint8_t *data, size_t len)
 {
 	uart_rx_publish(2, store_buf(data, len));
 	extern uint8_t RS485_type;
-    extern uint8_t dev_type;
-if (RS485_type == 1 || dev_type == 3) {
-		if (RS485_type == 1) {
-			/* 如果收到目标序列的前10字节，则发送指定响应 10 次，每次间隔 50ms
-			 * 触发序列（前10字节）：03 10 00 00 00 06 0C 4D 4F 32
-			 * 响应帧（9字节）：06 03 04 00 09 30 31 89 25
-			 */
-			static const uint8_t _trigger_prefix[10] = {
-				0x03, 0x10, 0x00, 0x00, 0x00, 0x06, 0x0C, 0x4D, 0x4F, 0x32
-			};
-			static const uint8_t _response_frame[9] = {
-				0x06, 0x03, 0x04, 0x00, 0x14, 0x30, 0x31,0x19,0x23
-			};
 
-			if (len >= 10 && memcmp(data, _trigger_prefix, 10) == 0) {
-				/* 发送10次响应，每次间隔50ms */
-				for (int _i = 0; _i < 10; ++_i) {
-					uart_tx(1, (uint8_t*)_response_frame, sizeof(_response_frame));
-					/* 使用 usleep 以毫秒为单位等待 50ms */
-					usleep(50 * 1000);
-				}
-				/* 匹配后仍继续后续处理（不提前返回） */
+	// 打印 UART2 收到的数据
+	dbg_printf("======= uart 2 read %u: ======\n", (unsigned int)len);
+	for (size_t i = 0; i < len; i++) {
+		dbg_printf("%02X ", data[i]);
+	}
+	dbg_printf("\n=======------------------=========\n");
+
+	if (RS485_type == 1) {
+		/* 如果收到目标序列的前10字节，则发送指定响应 10 次，每次间隔 50ms
+		 * 触发序列（前10字节）：03 10 00 00 00 06 0C 4D 4F 32
+		 * 响应帧（9字节）：06 03 04 00 09 30 31 89 25
+		 */
+		static const uint8_t _trigger_prefix[10] = {
+			0x03, 0x10, 0x00, 0x00, 0x00, 0x06, 0x0C, 0x4D, 0x4F, 0x32
+		};
+		static const uint8_t _response_frame[9] = {
+			0x06, 0x03, 0x04, 0x00, 0x14, 0x30, 0x31,0x19,0x23
+		};
+
+		if (len >= 10 && memcmp(data, _trigger_prefix, 10) == 0) {
+			/* 发送10次响应，每次间隔50ms */
+			for (int _i = 0; _i < 10; ++_i) {
+				uart_tx(1, (uint8_t*)_response_frame, sizeof(_response_frame));
+				/* 使用 usleep 以毫秒为单位等待 50ms */
+				usleep(50 * 1000);
 			}
 		}
-
-		process_modbus_sniffer_data(2, data, len);
-		//dbg_printf("[ModbusUART2" );
+		return;
 	}
-	else if (len == uartReceive_length) {
-		dbg_printf("======= uart 2 read 13: ======\n");
-		for (size_t i = 0; i < len; i++) {
-			dbg_printf("%02X ", data[i]);
-		}
-		dbg_printf("\n=======------------------=========\n");
 
-	//	energy_process(data, len);
-	}
-	
-	//haas_device_dataRead(data);
-
-	//humi_process(data, len);
+	process_modbus_sniffer_data(2, data, len);
 }
 
 void on_uart_1_write(uint8_t *data, size_t len)
@@ -1262,13 +1253,20 @@ void humi_device_control(uint8_t cmd)
 void on_uart_1_read(uint8_t *data, size_t len)
 {
 	uart_rx_publish(1, store_buf(data, len));
+
+	dbg_printf("======= uart 1 read %u: ======\n", (unsigned int)len);
+	for (size_t i = 0; i < len; i++) {
+		dbg_printf("%02X ", data[i]);
+	}
+	dbg_printf("\n=======------------------=========\n");
 	
 	// 统一走 Modbus 解析，便于主动轮询响应进入 store_register_data
 	process_modbus_sniffer_data(1, data, len);
 
-	// 保留旧逻辑：非 dev_type==2 场景继续走 haas_device_dataRead
+	// 主动模式且温湿设备走 haas_device_dataRead
 	extern uint8_t dev_type;
-	if (dev_type != 2) {
+	extern uint8_t RS485_type;
+	if (RS485_type == 0 && dev_type == 0) {
 		haas_device_dataRead(data);
 	}
 }

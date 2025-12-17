@@ -774,7 +774,7 @@ static time_t s_window_last_time = 0;
 
 void data_send_test(void)
 {
-//	char test_buf[]={};
+	//	char test_buf[]={};
 	char test_buf[10] = {0x05,0x03,0x10,0x00,0x00,0x04,0x41,0x4d};
 	printf("--------------------------test data send start -----------------------\r\n");
 	uart_tx(2, test_buf,8);
@@ -803,19 +803,24 @@ void *cmd_main(void *args)
 		if (RS485_type == 1) {
 			haas_data_detect();
 			sleep(1);
-		} else if (dev_type == 3) {
-			haas_energy_type2_init();
-			static bool s_full_read_done = false;
-			if (!s_full_read_done) {
-				haas_energy_type2_full_read();
+		} else if (RS485_type == 0) {
+			if (dev_type == 3) {
+				haas_energy_type2_init();
+				static bool s_full_read_done = false;
+				if (!s_full_read_done) {
+					haas_energy_type2_full_read();
+					sleep(1);
+					s_full_read_done = true;
+					s_cmd_last_run_time = now_time;      // 避免同一轮立即触发上传分支再次全读
+					s_window_last_time = now_time;        // 初始化窗口计时基准
+				}
+				if (g_energy_window_s > 0 && (now_time - s_window_last_time) >= g_energy_window_s) {
+					haas_energy_type2_window_cycle();
+					s_window_last_time = now_time;
+				}
+			} else {
+				haas_data_read();
 				sleep(1);
-				s_full_read_done = true;
-				s_cmd_last_run_time = now_time;      // 避免同一轮立即触发上传分支再次全读
-				s_window_last_time = now_time;        // 初始化窗口计时基准
-			}
-			if (g_energy_window_s > 0 && (now_time - s_window_last_time) >= g_energy_window_s) {
-				haas_energy_type2_window_cycle();
-				s_window_last_time = now_time;
 			}
 		} else {
 			haas_data_read();
@@ -826,7 +831,7 @@ void *cmd_main(void *args)
 		DATA_FUNCTION_INTERVAL_S = GetIniKeyInt("config", "upload_time", FILENAME);
 		printf("upload data interval:%d\r\n",DATA_FUNCTION_INTERVAL_S);
 		if (now_time - s_cmd_last_run_time >= DATA_FUNCTION_INTERVAL_S){
-			if (dev_type == 3) {
+			if (RS485_type == 0 && dev_type == 3) {
 				haas_energy_type2_full_read();
 				sleep(1);
 			}
