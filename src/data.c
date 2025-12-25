@@ -1613,6 +1613,9 @@ static void store_register_data(uint8_t slave_addr, uint16_t reg_addr, uint16_t 
 	} else if (map->data_type == 3 && aggregated) {
 		dbg_printf("[Modbus Store] %s Value(signed32)=%s offset:%u cmd:0x%02X (slot %d)\n",
 		           map->name, slot->text_value, offset, cmd, map_index);
+	} else if (map->data_type == 4 && aggregated) {
+		dbg_printf("[Modbus Store] %s Value(float32)=%s offset:%u cmd:0x%02X (slot %d)\n",
+		           map->name, slot->text_value, offset, cmd, map_index);
 	} else if (aggregated) {
 		dbg_printf("[Modbus Store] %s Value:%s offset:%u cmd:0x%02X (slot %d)\n",
 		           map->name, slot->text_value, offset, cmd, map_index);
@@ -1702,6 +1705,19 @@ static bool recalc_register_outputs(RegisterData *slot)
 			slot->numeric_value = (double)raw;
 			snprintf(slot->text_value, sizeof(slot->text_value), "%u", raw);
 		}
+		return true;
+	}
+
+	// 32 位浮点数（IEEE754，高字在前）
+	if (slot->data_type == 4) {
+		if (contiguous < 2) {
+			return false;
+		}
+		uint32_t raw = ((uint32_t)slot->reg_values[0] << 16) | slot->reg_values[1];
+		float f = 0.0f;
+		memcpy(&f, &raw, sizeof(f));
+		slot->numeric_value = (double)f;
+		snprintf(slot->text_value, sizeof(slot->text_value), "%g", slot->numeric_value);
 		return true;
 	}
 
