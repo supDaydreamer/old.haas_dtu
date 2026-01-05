@@ -92,6 +92,7 @@ typedef struct {
     double value_numeric;      // 聚合后的数值
     char value_text[64];       // 聚合后的文本
     uint8_t is_string;         // 1 表示当前值为字符串
+    uint8_t value_valid;       // 1 表示已获取到有效值
 } HAAS_DEV_RS485;
 
 typedef struct {

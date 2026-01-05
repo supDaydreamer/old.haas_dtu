@@ -792,6 +792,7 @@ void haas_device_dataRead(uint8_t *data)
 		     g_haas_dev_rs485[addr].value2 = g_haas_dev_rs485[addr].value1/10.0;
 		  }
 		}
+		g_haas_dev_rs485[addr].value_valid = 1;
 		printf("receive data is:%d,%.1f\r\n",g_haas_dev_rs485[addr].value1,g_haas_dev_rs485[addr].value2);
 		s_waiting_haas_th = false;
 	}
@@ -1742,6 +1743,7 @@ static void sync_register_to_rs485(int index, RegisterData *slot, const Register
 	dev->cmd = map->cmd;
 	dev->data_len = map->data_len;
 	dev->type = map->data_type;
+	dev->value_valid = aggregated ? 1 : 0;
 
 	if (slot->reg_ready_mask & 0x01) {
 		dev->value1 = slot->reg_values[0];
@@ -2702,6 +2704,7 @@ void clear_register_data(void)
 			dev->value_numeric = 0.0;
 			dev->value_text[0] = '\0';
 			dev->is_string = 0;
+			dev->value_valid = 0;
 		}
 	}
 

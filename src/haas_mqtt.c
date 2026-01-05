@@ -40,6 +40,34 @@ static uint8_t yield_flag = 0;
 static char g_payload[UART_DATA_BUF_SIZE];
 static char g_topic_buf[MQTT_TOPIC_LEN_MAX] = {0};
 
+static size_t escape_json_string(const char *in, char *out, size_t out_len)
+{
+	size_t w = 0;
+	for (size_t i = 0; in[i] != '\0'; i++) {
+		char c = in[i];
+		if (w + 2 >= out_len) break;
+		if (c == '\\' || c == '\"') {
+			out[w++] = '\\';
+			out[w++] = c;
+		} else if (c == '\n') {
+			out[w++] = '\\';
+			out[w++] = 'n';
+		} else if (c == '\r') {
+			out[w++] = '\\';
+			out[w++] = 'r';
+		} else if (c == '\t') {
+			out[w++] = '\\';
+			out[w++] = 't';
+		} else if ((unsigned char)c < 0x20) {
+			out[w++] = ' ';
+		} else {
+			out[w++] = c;
+		}
+	}
+	out[w] = '\0';
+	return w;
+}
+
 static Network n;
 static MQTTClient c;
 static MQTTMessage pubmsg;
@@ -623,7 +651,7 @@ void mqtt_haas_data_publish()
 void haas_mqtt_data_upload(void)
 {
 	char s_payload[UART_DATA_BUF_SIZE];
-	char s_data[500];
+	char s_data[1200];
 	char s_topic_buf[MQTT_TOPIC_LEN_MAX] = {0};
 snprintf(s_topic_buf, sizeof(s_topic_buf), "/%d/%s/property/post",product_ID,g_bf_code);
 
@@ -641,33 +669,39 @@ sprintf(s_data,"{");
 	// 统计唯一设备地址数量
 	uint8_t unique_ids[50] = {0};
 	int unique_count = 0;
+	extern uint8_t dev_type;
 
 	for(int i =0;i<haas_device_num;i++)
 	{
 		HAAS_DEV_RS485 *dev = &g_haas_dev_rs485[i];
-		extern uint8_t dev_type;
 		bool should_append_id = (dev_type == 2);  // 仅空调设备上报从机地址
 		uint8_t dev_add = dev->dev_add;
 		if(i<9)
 		{
-			if (dev->is_string) {
+			if (!dev->value_valid) {
+				len1 = snprintf(s_data + len, sizeof(s_data) - len,
+			                "\t\"V0%d\": null,\r\n", i + 1);
+			} else if (dev->is_string) {
 				len1 = snprintf(s_data + len, sizeof(s_data) - len,
 			                "\t\"V0%d\": \"%s\",\r\n", i + 1, dev->value_text);
-		} else {
-			len1 = snprintf(s_data + len, sizeof(s_data) - len,
+			} else {
+				len1 = snprintf(s_data + len, sizeof(s_data) - len,
 			                "\t\"V0%d\": %.1f,\r\n", i + 1, dev->value2);
+			}
 		}
-	}
-	else
-	{
-		if (dev->is_string) {
-			len1 = snprintf(s_data + len, sizeof(s_data) - len,
+		else
+		{
+			if (!dev->value_valid) {
+				len1 = snprintf(s_data + len, sizeof(s_data) - len,
+			                "\t\"V%d\": null,\r\n", i + 1);
+			} else if (dev->is_string) {
+				len1 = snprintf(s_data + len, sizeof(s_data) - len,
 			                "\t\"V%d\": \"%s\",\r\n", i + 1, dev->value_text);
-		} else {
-			len1 = snprintf(s_data + len, sizeof(s_data) - len,
+			} else {
+				len1 = snprintf(s_data + len, sizeof(s_data) - len,
 			                "\t\"V%d\": %.1f,\r\n", i + 1, dev->value2);
+			}
 		}
-	}
 		if (len1 < 0) {
 			len1 = 0;
 		}
@@ -699,6 +733,82 @@ sprintf(s_data,"{");
 			}
 			unique_count++;
 		}
+	}
+
+	// 附加空调模式 JSON 字符串字段
+	if (dev_type == 2 && unique_count > 0) {
+		char json_inner[512];
+		char json_escaped[1024];
+		size_t json_len = 0;
+		bool first_field = true;
+
+		json_inner[json_len++] = '{';
+		json_inner[json_len] = '\0';
+
+		for (int u = 0; u < unique_count; u++) {
+			uint8_t slave = unique_ids[u];
+			int idx = u + 1;
+			RegisterData *sw = get_register_data(slave, 2, 0x03);
+			RegisterData *md = get_register_data(slave, 17, 0x03);
+
+			if (!first_field && json_len + 1 < sizeof(json_inner)) {
+				json_inner[json_len++] = ',';
+				json_inner[json_len] = '\0';
+			}
+			len1 = snprintf(json_inner + json_len, sizeof(json_inner) - json_len,
+			                "\"ID%02d\":%u", idx, slave);
+			if (len1 > 0) json_len += (size_t)len1;
+			if (json_len + 1 < sizeof(json_inner)) {
+				json_inner[json_len++] = ',';
+				json_inner[json_len] = '\0';
+			}
+
+			if (sw && sw->is_valid) {
+				len1 = snprintf(json_inner + json_len, sizeof(json_inner) - json_len,
+				                "\"switch%02d\":%d", idx, (int)(sw->numeric_value));
+			} else {
+				len1 = snprintf(json_inner + json_len, sizeof(json_inner) - json_len,
+				                "\"switch%02d\":\"XX\"", idx);
+			}
+			if (len1 > 0) json_len += (size_t)len1;
+			if (json_len + 1 < sizeof(json_inner)) {
+				json_inner[json_len++] = ',';
+				json_inner[json_len] = '\0';
+			}
+
+			if (md && md->is_valid) {
+				len1 = snprintf(json_inner + json_len, sizeof(json_inner) - json_len,
+				                "\"mode%02d\":%d", idx, (int)(md->numeric_value));
+			} else {
+				len1 = snprintf(json_inner + json_len, sizeof(json_inner) - json_len,
+				                "\"mode%02d\":\"XX\"", idx);
+			}
+			if (len1 > 0) json_len += (size_t)len1;
+			first_field = false;
+			if (json_len + 2 >= sizeof(json_inner)) break;
+			if (u + 1 < unique_count) {
+				if (json_len + 1 < sizeof(json_inner)) {
+					json_inner[json_len++] = ',';
+					json_inner[json_len] = '\0';
+				}
+				first_field = true;
+			}
+		}
+
+		if (json_len + 1 < sizeof(json_inner)) {
+			json_inner[json_len++] = '}';
+			json_inner[json_len] = '\0';
+		} else {
+			snprintf(json_inner, sizeof(json_inner), "{}");
+		}
+
+		escape_json_string(json_inner, json_escaped, sizeof(json_escaped));
+		len1 = snprintf(s_data + len, sizeof(s_data) - len,
+		                "\t\"JSON\": \"%s\",\r\n", json_escaped);
+		if (len1 < 0) {
+			len1 = 0;
+		}
+		len += len1;
 	}
 
 	// 附加设备数量字段 NUM，表示有效设备数

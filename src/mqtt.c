@@ -507,7 +507,7 @@ void mqtt_haas_data_publish()
 void mqtt_data_upload(void)
 {
 	char s_payload[UART_DATA_BUF_SIZE];
-	char s_data[500];
+	char s_data[UART_DATA_BUF_SIZE];
 	char s_topic_buf[MQTT_TOPIC_LEN_MAX] = {0};
 	snprintf(s_topic_buf, sizeof(s_topic_buf), "/iotdevice/dtu_status/upload/%s", g_bf_code);
 
@@ -518,60 +518,89 @@ void mqtt_data_upload(void)
 }",0,0);
 #endif
 
-int len = 0;
-int len1 = 0;
-sprintf(s_data,"{");
-len +=1;
+	size_t len = 0;
+	size_t last_comma_pos = 0;
+	int len1 = 0;
+
+	s_data[0] = '{';
+	s_data[1] = '\0';
+	len = 1;
 for(int i =0;i<haas_device_num;i++)
 {
 	HAAS_DEV_RS485 *dev = &g_haas_dev_rs485[i];
+	size_t remaining = sizeof(s_data) - len;
+	if (remaining <= 1) {
+		break;
+	}
 	if(i<9)
 	{
-		if (dev->is_string) {
-			len1 = snprintf(s_data + len, sizeof(s_data) - len,
+		if (!dev->value_valid) {
+			len1 = snprintf(s_data + len, remaining,
+			                "\t\"V0%d\": null,\r\n", i + 1);
+		} else if (dev->is_string) {
+			len1 = snprintf(s_data + len, remaining,
 			                "\t\"V0%d\": \"%s\",\r\n", i + 1, dev->value_text);
 		} else {
-			len1 = snprintf(s_data + len, sizeof(s_data) - len,
+			len1 = snprintf(s_data + len, remaining,
 			                "\t\"V0%d\": %.1f,\r\n", i + 1, dev->value2);
 		}
 	}
 	else
 	{
-		if (dev->is_string) {
-			len1 = snprintf(s_data + len, sizeof(s_data) - len,
+		if (!dev->value_valid) {
+			len1 = snprintf(s_data + len, remaining,
+			                "\t\"V%d\": null,\r\n", i + 1);
+		} else if (dev->is_string) {
+			len1 = snprintf(s_data + len, remaining,
 			                "\t\"V%d\": \"%s\",\r\n", i + 1, dev->value_text);
 		} else {
-			len1 = snprintf(s_data + len, sizeof(s_data) - len,
+			len1 = snprintf(s_data + len, remaining,
 			                "\t\"V%d\": %.1f,\r\n", i + 1, dev->value2);
 		}
 	}
 	if (len1 < 0) {
-		len1 = 0;
+		s_data[len] = '\0';
+		break;
 	}
-	len += len1;
+	if ((size_t)len1 >= remaining) {
+		s_data[len] = '\0';
+		break;
+	}
+	len += (size_t)len1;
+	if (len >= 3) {
+		last_comma_pos = len - 3;
+	}
 }
 if (g_energy_window_value_ready) {
 	int dev_idx = haas_device_num;
 	int dev_num = dev_idx + 1;
+	size_t remaining = sizeof(s_data) - len;
+	if (remaining > 1) {
 	if (dev_num < 10) {
-		len1 = snprintf(s_data + len, sizeof(s_data) - len,
+		len1 = snprintf(s_data + len, remaining,
 		                "\t\"V0%d\": %.1f,\r\n", dev_num, g_energy_window_value_wh);
 	} else {
-		len1 = snprintf(s_data + len, sizeof(s_data) - len,
+		len1 = snprintf(s_data + len, remaining,
 		                "\t\"V%d\": %.1f,\r\n", dev_num, g_energy_window_value_wh);
 	}
 	if (len1 < 0) {
-		len1 = 0;
+		s_data[len] = '\0';
+	} else if ((size_t)len1 >= remaining) {
+		s_data[len] = '\0';
+	} else {
+		len += (size_t)len1;
+		if (len >= 3) {
+			last_comma_pos = len - 3;
+		}
 	}
-	len += len1;
+	}
 }
 
-if (len >= 3) {
-	len -= 3;
-	snprintf(s_data + len, sizeof(s_data) - len, "}");
+if (last_comma_pos > 0 && last_comma_pos + 1 < sizeof(s_data)) {
+	s_data[last_comma_pos] = '}';
+	s_data[last_comma_pos + 1] = '\0';
 } else {
 	snprintf(s_data, sizeof(s_data), "{}");
-	len = strlen(s_data);
 }
 
 printf("mqtt_data_upload topic:%s\r\n",s_topic_buf);
