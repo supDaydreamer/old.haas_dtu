@@ -167,7 +167,7 @@ void *uart_rx_task(void *args)
 	BFMSG_BOX_HANDLE box_handle = bfmsg_box_init(UART_MSG_BOX_DEEP);
 	if (uart_index == 1) {
 		g_uart1_rx_box_handle = box_handle;
-		usleep_time = 20 * 1000;
+		usleep_time = 200 * 1000;
 	} else if (uart_index == 2) {
 		g_uart2_rx_box_handle = box_handle;
 		usleep_time = 200 * 1000;
@@ -248,4 +248,3 @@ void uart_tx(uint32_t uart_index, uint8_t *data, size_t len)
 	//close(s_fd[uart_index]);
 	//s_fd_inited_map &= (~(1 << uart_index));
 }
-
