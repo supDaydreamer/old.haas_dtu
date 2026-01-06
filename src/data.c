@@ -78,15 +78,15 @@ static const uint16_t kEnergyFullReadStartReg = 0x1100;
 static const uint16_t kEnergyFullReadRegCount = 0x0012;
 // 固定全读帧：从0x1100开始读18个寄存器，addr=0x0A，功能码0x03，CRC=0xC1 0x80（低字节在前）
 static const uint8_t kEnergyFullReadFrame[] = {0x0A, 0x03, 0x11, 0x00, 0x00, 0x12, 0xC1, 0x80};
-static const uint8_t kEnergyFaultReadSlaveAddr = 0x01;
-static const uint8_t kEnergyFaultReadFunc = 0x03;
-static const uint16_t kEnergyFaultReadStartReg = 0x0008;
-static const uint16_t kEnergyFaultReadRegCount = 0x0001;
-// 恒湿机故障读取：读寄存器0x0008，功能码0x03，CRC=0x05 0xC8（低字节在前）
-static const uint8_t kEnergyFaultReadFrame[] = {0x01, 0x03, 0x00, 0x08, 0x00, 0x01, 0x05, 0xC8};
+static const uint8_t kEnergyReadSlaveAddr = 0x01;
+static const uint8_t kEnergyReadFunc = 0x03;
+static const uint16_t kEnergyReadStartReg = 0x0000;
+static const uint16_t kEnergyReadRegCount = 0x0013;
+// 恒湿机寄存器读取：从0x0000开始读19个寄存器，功能码0x03，CRC=0x04 0x07（低字节在前）
+static const uint8_t kEnergyReadFrame[] = {0x01, 0x03, 0x00, 0x00, 0x00, 0x13, 0x04, 0x07};
 // 恒湿机控制：自动调湿模式与目标湿度45%，并开机
 static const uint8_t kHumiAutoModeFrame[] = {0x01, 0x06, 0x00, 0x12, 0x00, 0x00, 0x29, 0xCF};
-static const uint8_t kHumiSetpoint45Frame[] = {0x01, 0x06, 0x00, 0x01, 0x00, 0x2D, 0x18, 0x17};
+static const uint8_t kHumiSetpoint50Frame[] = {0x01, 0x06, 0x00, 0x01, 0x00, 0x32, 0x59, 0xDF};
 static const uint8_t kHumiPowerOnFrame[] = {0x00, 0x06, 0x00, 0xEE, 0x00, 0xAA, 0x68, 0x51};
 
 // Modbus监测函数前向声明
@@ -252,8 +252,8 @@ void haas_energy_type2_init(void)
 	dbg_printf("[DevType2] Init step: humi auto mode (%zu bytes)\n", sizeof(kHumiAutoModeFrame));
 	uart_tx(2, (uint8_t *)kHumiAutoModeFrame, sizeof(kHumiAutoModeFrame));
 	sleep(1);
-	dbg_printf("[DevType2] Init step: humi setpoint 45%% (%zu bytes)\n", sizeof(kHumiSetpoint45Frame));
-	uart_tx(2, (uint8_t *)kHumiSetpoint45Frame, sizeof(kHumiSetpoint45Frame));
+	dbg_printf("[DevType2] Init step: humi setpoint 50%% (%zu bytes)\n", sizeof(kHumiSetpoint50Frame));
+	uart_tx(2, (uint8_t *)kHumiSetpoint50Frame, sizeof(kHumiSetpoint50Frame));
 	sleep(1);
 	dbg_printf("[DevType2] Init step: humi power on (%zu bytes)\n", sizeof(kHumiPowerOnFrame));
 	uart_tx(2, (uint8_t *)kHumiPowerOnFrame, sizeof(kHumiPowerOnFrame));
@@ -281,14 +281,14 @@ void haas_energy_type2_full_read(void)
 
 	// 读取恒湿机故障寄存器，避免与全读响应抢占，增加间隔
 	sleep(1);
-	uart_tx(2, (uint8_t *)kEnergyFaultReadFrame, sizeof(kEnergyFaultReadFrame));
+	uart_tx(2, (uint8_t *)kEnergyReadFrame, sizeof(kEnergyReadFrame));
 
 	ModbusRequest fault_req = {
-		.slave_addr = kEnergyFaultReadSlaveAddr,
-		.function_code = kEnergyFaultReadFunc,
+		.slave_addr = kEnergyReadSlaveAddr,
+		.function_code = kEnergyReadFunc,
 		.channel = 2,
-		.start_reg = kEnergyFaultReadStartReg,
-		.reg_count = kEnergyFaultReadRegCount,
+		.start_reg = kEnergyReadStartReg,
+		.reg_count = kEnergyReadRegCount,
 		.timestamp = time(NULL),
 		.is_valid = true
 	};
