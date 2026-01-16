@@ -674,7 +674,7 @@ sprintf(s_data,"{");
 	for(int i =0;i<haas_device_num;i++)
 	{
 		HAAS_DEV_RS485 *dev = &g_haas_dev_rs485[i];
-		bool should_append_id = (dev_type == 2);  // 仅空调设备上报从机地址
+		bool should_append_id = (dev_type == 2 || dev_type == 1);  // 空调与空调+风机上报从机地址
 		uint8_t dev_add = dev->dev_add;
 		if(i<9)
 		{
@@ -686,7 +686,7 @@ sprintf(s_data,"{");
 			                "\t\"V0%d\": \"%s\",\r\n", i + 1, dev->value_text);
 			} else {
 				len1 = snprintf(s_data + len, sizeof(s_data) - len,
-			                "\t\"V0%d\": %.1f,\r\n", i + 1, dev->value2);
+			                "\t\"V0%d\": %.5f,\r\n", i + 1, dev->value2);
 			}
 		}
 		else
@@ -699,7 +699,7 @@ sprintf(s_data,"{");
 			                "\t\"V%d\": \"%s\",\r\n", i + 1, dev->value_text);
 			} else {
 				len1 = snprintf(s_data + len, sizeof(s_data) - len,
-			                "\t\"V%d\": %.1f,\r\n", i + 1, dev->value2);
+			                "\t\"V%d\": %.5f,\r\n", i + 1, dev->value2);
 			}
 		}
 		if (len1 < 0) {
@@ -735,8 +735,23 @@ sprintf(s_data,"{");
 		}
 	}
 
+	if (dev_type == 1) {
+		int fan = get_fan_value();
+		if (fan < 0) {
+			len1 = snprintf(s_data + len, sizeof(s_data) - len,
+			                "\t\"FAN\": null,\r\n");
+		} else {
+			len1 = snprintf(s_data + len, sizeof(s_data) - len,
+			                "\t\"FAN\": %d,\r\n", fan);
+		}
+		if (len1 < 0) {
+			len1 = 0;
+		}
+		len += len1;
+	}
+
 	// 附加空调模式 JSON 字符串字段
-	if (dev_type == 2 && unique_count > 0) {
+	if ((dev_type == 2 || dev_type == 1) && unique_count > 0) {
 		char json_inner[512];
 		char json_escaped[1024];
 		size_t json_len = 0;
@@ -793,6 +808,22 @@ sprintf(s_data,"{");
 				}
 				first_field = true;
 			}
+		}
+
+		if (dev_type == 1) {
+			int fan = get_fan_value();
+			if (json_len + 1 < sizeof(json_inner)) {
+				json_inner[json_len++] = ',';
+				json_inner[json_len] = '\0';
+			}
+			if (fan < 0) {
+				len1 = snprintf(json_inner + json_len, sizeof(json_inner) - json_len,
+				                "\"FAN\":null");
+			} else {
+				len1 = snprintf(json_inner + json_len, sizeof(json_inner) - json_len,
+				                "\"FAN\":%d", fan);
+			}
+			if (len1 > 0) json_len += (size_t)len1;
 		}
 
 		if (json_len + 1 < sizeof(json_inner)) {

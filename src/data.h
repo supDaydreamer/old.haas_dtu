@@ -59,7 +59,7 @@ typedef struct {
 // Modbus请求帧结构
 typedef struct ModbusRequest {
 	uint8_t slave_addr;      // 从机地址
-	uint8_t function_code;   // 功能码（0x03/0x01/0x06/0x10）
+	uint8_t function_code;   // 功能码（0x01/0x03/0x05/0x06/0x10）
 	uint8_t channel;         // 来源通道（如UART1/2），避免跨通道误匹配
 	uint16_t start_reg;      // 起始寄存器/线圈地址
 	uint16_t reg_count;      // 连续寄存器/线圈数量
@@ -308,6 +308,7 @@ void energy_init();
 void energy_read();
 void haas_data_read();
 void haas_data_upload();
+int get_fan_value(void);
 void haas_data_detect();
 void haas_energy_type2_init(void);
 void haas_energy_type2_poll(void);

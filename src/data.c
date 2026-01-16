@@ -433,6 +433,7 @@ const char read_haas_temp_cmd[] = {0x05,0x03,0x10,0x00,0x00,0x04,0x41,0x4d};
 
 static bool s_waiting_haas_th = false;
 //static bool s_waiting_haas_temp = false;
+static int s_fan_value = -1;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Modbus监测相关全局变量
@@ -447,6 +448,11 @@ static bool s_register_map_initialized = false;
 static uint8_t s_modbus_rx_buffer[256] = {0};
 static uint8_t s_modbus_rx_index = 0;
 static time_t s_last_rx_time = 0;
+
+int get_fan_value(void)
+{
+	return s_fan_value;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 void on_haas_time_receive(HAAS_TIME haas_time)
@@ -1447,15 +1453,19 @@ static bool parse_modbus_request(uint8_t *data, size_t len, ModbusRequest *req)
 		return false;
 	}
 
-	// 只处理03/04功能码（读保持/输入寄存器）和01功能码（读线圈状态）
-	if (data[1] != 0x03 && data[1] != 0x04 && data[1] != 0x01) {
+	// 只处理03/04功能码（读保持/输入寄存器）、01功能码（读线圈状态）与05功能码（写单线圈）
+	if (data[1] != 0x03 && data[1] != 0x04 && data[1] != 0x01 && data[1] != 0x05) {
 		return false;
 	}
 	
 	req->slave_addr = data[0];
 	req->function_code = data[1];
 	req->start_reg = (data[2] << 8) | data[3];
-	req->reg_count = (data[4] << 8) | data[5];
+	if (data[1] == 0x05) {
+		req->reg_count = 1;
+	} else {
+		req->reg_count = (data[4] << 8) | data[5];
+	}
 	req->timestamp = time(NULL);
 	req->is_valid = true;
 	
@@ -1821,6 +1831,11 @@ static bool parse_modbus_response(uint8_t channel, uint8_t *data, size_t len)
 		// 功能码01：读线圈状态（每个线圈1位，8个线圈打包成1字节）
 		// byte_count 表示字节数，每个字节包含8个线圈状态
 		uint16_t coil_count = req->reg_count;  // 实际请求的线圈数量
+		extern uint8_t dev_type;
+		bool is_fan_single = (dev_type == 1 &&
+		                      slave_addr == 0x01 &&
+		                      req->start_reg == 0x0000 &&
+		                      req->reg_count == 1);
 		
 		for (int i = 0; i < coil_count; i++) {
 			uint16_t coil_addr = req->start_reg + i;
@@ -1835,7 +1850,12 @@ static bool parse_modbus_response(uint8_t channel, uint8_t *data, size_t len)
 			
 			dbg_printf("[Modbus 0x01] Coil:0x%04X Value:%d\n", 
 			           coil_addr, coil_value);
-			
+
+			if (is_fan_single && coil_addr == 0x0000) {
+				s_fan_value = coil_value;
+				continue;
+			}
+
 			// 存储线圈状态（以uint16_t格式存储，值为0或1）
 			store_register_data(slave_addr, coil_addr, coil_value, 0x01);
 		}
@@ -1905,6 +1925,56 @@ static void process_modbus_sniffer_data(uint8_t channel, uint8_t *data, size_t l
 		}
 	}
 	
+	// 处理功能码05（写单线圈）
+	if (function_code == 0x05) {
+		// 功能码05的请求和响应格式相同：
+		// 地址(1) + 功能码(1) + 线圈地址(2) + 写入值(2) + CRC(2) = 8字节
+		if (len == 8 && check_modbus_crc(data, len)) {
+			uint8_t slave_addr = data[0];
+			uint16_t reg_addr = (data[2] << 8) | data[3];
+			uint16_t write_value = (data[4] << 8) | data[5];
+
+			if (write_value != 0xFF00 && write_value != 0x0000) {
+				dbg_printf("[Modbus 0x05] Invalid coil value: 0x%04X\n", write_value);
+				return;
+			}
+
+			// 使用请求-响应匹配机制区分请求和响应
+			bool is_response = false;
+			for (int i = 0; i < MAX_PENDING_REQUESTS; i++) {
+				if (g_pending_requests[i].is_valid &&
+					g_pending_requests[i].channel == channel &&
+					g_pending_requests[i].slave_addr == slave_addr &&
+					g_pending_requests[i].start_reg == reg_addr &&
+					g_pending_requests[i].function_code == 0x05) {
+					// 找到匹配的请求，这是响应包
+					is_response = true;
+					g_pending_requests[i].is_valid = false;
+					break;
+				}
+			}
+
+			if (is_response) {
+				uint16_t coil_value = (write_value == 0xFF00) ? 1 : 0;
+				store_register_data(slave_addr, reg_addr, coil_value, 0x05);
+				dbg_printf("[Modbus 0x05 Response] Addr:0x%02X Coil:0x%04X Value:%u\n",
+				           slave_addr, reg_addr, coil_value);
+			} else {
+				ModbusRequest req = {
+					.slave_addr = slave_addr,
+					.start_reg = reg_addr,
+					.function_code = 0x05,
+					.channel = channel,
+					.reg_count = 1,  // 写单个线圈
+					.timestamp = time(NULL),
+					.is_valid = true
+				};
+				add_pending_request(&req);
+			}
+			return;
+		}
+	}
+
 	// 处理功能码06（写单个寄存器）
 	if (function_code == 0x06) {
 		// 功能码06的请求和响应格式相同：
@@ -2103,7 +2173,7 @@ printf("uart1 send data is:");
 		device_no = i+1;
 		g_haas_dev_rs485[i].index = i+1;
 
-		uint8_t tx_uart = (dev_type == 2) ? 1 : 2;
+		uint8_t tx_uart = (dev_type == 2 || dev_type == 1) ? 1 : 2;
 		bool locked = false;
 		for (int retry = 0; retry < 10; retry++) {
 			if (tx_uart >= 1 && tx_uart <= 2 && s_uart_control_pending[tx_uart]) {
@@ -2178,6 +2248,41 @@ printf("uart1 send data is:");
 	//sleep(2);
 	}
 #endif
+
+	if (dev_type == 1) {
+		uint8_t tx_uart = (dev_type == 2 || dev_type == 1) ? 1 : 2;
+		bool locked = false;
+		for (int retry = 0; retry < 10; retry++) {
+			if (tx_uart >= 1 && tx_uart <= 2 && s_uart_control_pending[tx_uart]) {
+				usleep(50 * 1000);
+				continue;
+			}
+			locked = uart_channel_try_lock(tx_uart);
+			if (locked) break;
+			usleep(50 * 1000);
+		}
+		if (!locked) {
+			dbg_printf("[Modbus Poll] uart%u busy, skip FAN read this round\n", tx_uart);
+			return;
+		}
+
+		static const uint8_t kFanReadFrame[] = {0x01, 0x01, 0x00, 0x00, 0x00, 0x01, 0xFD, 0xCA};
+		uart_tx(tx_uart, (uint8_t *)kFanReadFrame, sizeof(kFanReadFrame));
+		dbg_printf("[Modbus Poll] FAN read uart%u tx: 01 01 00 00 00 01 FD CA\n", tx_uart);
+
+		ModbusRequest req = {
+			.slave_addr = 0x01,
+			.function_code = 0x01,
+			.channel = tx_uart,
+			.start_reg = 0x0000,
+			.reg_count = 1,
+			.timestamp = time(NULL),
+			.is_valid = true
+		};
+		add_pending_request(&req);
+
+		uart_channel_unlock(tx_uart);
+	}
 }
 
 void haas_data_save(void)
@@ -2283,6 +2388,18 @@ void haas_data_upload(void)
 			len += snprintf(payload + len, sizeof(payload) - len, "%s:%.6g",
 			               key,
 			               dev->value_numeric);
+		}
+	}
+
+	if (dev_type == 1) {
+		if (!first) {
+			len += snprintf(payload + len, sizeof(payload) - len, ",");
+		}
+		first = false;
+		if (s_fan_value < 0) {
+			len += snprintf(payload + len, sizeof(payload) - len, "\"FAN\":null");
+		} else {
+			len += snprintf(payload + len, sizeof(payload) - len, "\"FAN\":%d", s_fan_value);
 		}
 	}
 
