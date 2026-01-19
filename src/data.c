@@ -397,8 +397,6 @@ static bool s_waiting_haas_config = false;
 //static bool s_waiting_haas_online = false;
 static bool s_waiting_haas_sync_time = false;
 //static bool s_waiting_haas_upload_data = false;
-static const useconds_t k_modbus_wait_step_us = 20 * 1000;
-static const useconds_t k_modbus_wait_timeout_us = 500 * 1000;
 
 // UART占用标志，用于简单模拟“中断”排他，防止控制与轮询互相干扰
 static volatile bool s_uart_busy[3] = {false, false, false};  // 仅使用索引1/2
@@ -440,7 +438,6 @@ const char read_haas_th_cmd[] = {0x05,0x03,0x10,0x00,0x00,0x04,0x41,0x4d};
 const char read_haas_temp_cmd[] = {0x05,0x03,0x10,0x00,0x00,0x04,0x41,0x4d};
 
 static bool s_waiting_haas_th = false;
-static const time_t k_modbus_req_timeout_s = 3;
 //static bool s_waiting_haas_temp = false;
 static int s_fan_value = -1;
 
@@ -1573,7 +1570,7 @@ static void cleanup_timeout_requests(void)
 	time_t now = time(NULL);
 	for (int i = 0; i < MAX_PENDING_REQUESTS; i++) {
 		if (g_pending_requests[i].is_valid) {
-			if (now - g_pending_requests[i].timestamp > k_modbus_req_timeout_s) {
+			if (now - g_pending_requests[i].timestamp > 1) {  // 1秒超时
 				dbg_printf("[Modbus Monitor] Request timeout at slot %d (ch%u)\n",
 				           i, g_pending_requests[i].channel);
 				g_pending_requests[i].is_valid = false;
@@ -1918,7 +1915,6 @@ static bool parse_modbus_response(uint8_t channel, uint8_t *data, size_t len)
 	
 	dbg_printf("[Modbus Resp] Matched! Addr:%02X Func:%02X ByteCount:%d Ch:%u\n",
 	           slave_addr, function_code, byte_count, channel);
-	s_waiting_haas_th = false;
 	
 	// 根据功能码分别提取数据
 	if (function_code == 0x03 || function_code == 0x04) {
@@ -2337,19 +2333,17 @@ printf("uart1 send data is:");
 		time_t now_time = time(NULL);
 		s_haas_data_send_time = now_time;
 		s_waiting_haas_th = true;
-		useconds_t waited_us = 0;
-		while (s_waiting_haas_th) {
+		while (s_waiting_haas_th) 
+		{
+			time_t now_time = time(NULL);
 			if (tx_uart >= 1 && tx_uart <= 2 && s_uart_control_pending[tx_uart]) {
 				dbg_printf("[Modbus Poll] uart%u interrupted by control, exit wait\n", tx_uart);
 				s_waiting_haas_th = false;
 				break;
 			}
-			if (waited_us >= k_modbus_wait_timeout_us) {
+			if (now_time - s_haas_data_send_time >= 1) {
 				s_waiting_haas_th = false;
-				break;
 			}
-			usleep(k_modbus_wait_step_us);
-			waited_us += k_modbus_wait_step_us;
 		}
 
 		uart_channel_unlock(tx_uart);
