@@ -397,6 +397,8 @@ static bool s_waiting_haas_config = false;
 //static bool s_waiting_haas_online = false;
 static bool s_waiting_haas_sync_time = false;
 //static bool s_waiting_haas_upload_data = false;
+static const useconds_t k_modbus_wait_step_us = 20 * 1000;
+static const useconds_t k_modbus_wait_timeout_us = 500 * 1000;
 
 // UART占用标志，用于简单模拟“中断”排他，防止控制与轮询互相干扰
 static volatile bool s_uart_busy[3] = {false, false, false};  // 仅使用索引1/2
@@ -438,6 +440,7 @@ const char read_haas_th_cmd[] = {0x05,0x03,0x10,0x00,0x00,0x04,0x41,0x4d};
 const char read_haas_temp_cmd[] = {0x05,0x03,0x10,0x00,0x00,0x04,0x41,0x4d};
 
 static bool s_waiting_haas_th = false;
+static const time_t k_modbus_req_timeout_s = 3;
 //static bool s_waiting_haas_temp = false;
 static int s_fan_value = -1;
 
@@ -1570,7 +1573,7 @@ static void cleanup_timeout_requests(void)
 	time_t now = time(NULL);
 	for (int i = 0; i < MAX_PENDING_REQUESTS; i++) {
 		if (g_pending_requests[i].is_valid) {
-			if (now - g_pending_requests[i].timestamp > 3) {  // 3秒超时
+			if (now - g_pending_requests[i].timestamp > k_modbus_req_timeout_s) {
 				dbg_printf("[Modbus Monitor] Request timeout at slot %d (ch%u)\n",
 				           i, g_pending_requests[i].channel);
 				g_pending_requests[i].is_valid = false;
@@ -1638,6 +1641,19 @@ static void store_register_data(uint8_t slave_addr, uint16_t reg_addr, uint16_t 
 	RegisterData *slot = &g_register_data[map_index];
 	uint16_t effective_len = clamp_data_len(map->data_len);
 
+	if ((cmd == 0x01 || cmd == 0x02) && map->data_type != 0) {
+		if (map_index < (int)(sizeof(g_haas_dev_rs485) / sizeof(g_haas_dev_rs485[0]))) {
+			HAAS_DEV_RS485 *dev = &g_haas_dev_rs485[map_index];
+			dev->value1 = 0;
+			dev->value2 = 0.0f;
+			dev->value_numeric = 0.0;
+			dev->value_text[0] = '\0';
+			dev->is_string = 0;
+			dev->value_valid = 0;
+		}
+		return;
+	}
+
 	if (offset >= effective_len || offset >= (REGISTER_VALUE_MAX_BYTES / 2)) {
 		dbg_printf("[Modbus Store] Ignore: Addr:%02X Reg:%04X offset:%u exceeds range Len:%u (slot %d)\n",
 		           slave_addr, reg_addr, offset, effective_len, map_index);
@@ -1659,6 +1675,21 @@ static void store_register_data(uint8_t slave_addr, uint16_t reg_addr, uint16_t 
 	}
 
 	slot->last_update = time(NULL);
+
+	if (offset == 1 &&
+	    (map->data_type == 1 || map->data_type == 3 || map->data_type == 4 ||
+	     map->data_type == 5 || map->data_type == 6)) {
+		dbg_printf("[Modbus Store] %s Word0:0x%04X Word1:0x%04X cmd:0x%02X (slot %d)\n",
+		           map->name, slot->reg_values[0], slot->reg_values[1], cmd, map_index);
+		uint32_t raw_hi = ((uint32_t)slot->reg_values[0] << 16) | slot->reg_values[1];
+		uint32_t raw_lo = ((uint32_t)slot->reg_values[1] << 16) | slot->reg_values[0];
+		float f_hi = 0.0f;
+		float f_lo = 0.0f;
+		memcpy(&f_hi, &raw_hi, sizeof(f_hi));
+		memcpy(&f_lo, &raw_lo, sizeof(f_lo));
+		dbg_printf("[Modbus Store] %s U32(HL)=%u U32(LH)=%u F32(HL)=%g F32(LH)=%g\n",
+		           map->name, raw_hi, raw_lo, f_hi, f_lo);
+	}
 
 	bool first_valid = !slot->is_valid;
 	if (first_valid) {
@@ -1771,12 +1802,36 @@ static bool recalc_register_outputs(RegisterData *slot)
 		return true;
 	}
 
+	// 32 位无符号整型（低字在前）
+	if (slot->data_type == 5) {
+		if (contiguous < 2) {
+			return false;
+		}
+		uint32_t raw = ((uint32_t)slot->reg_values[1] << 16) | slot->reg_values[0];
+		slot->numeric_value = (double)raw;
+		snprintf(slot->text_value, sizeof(slot->text_value), "%u", raw);
+		return true;
+	}
+
 	// 32 位浮点数（IEEE754，高字在前）
 	if (slot->data_type == 4) {
 		if (contiguous < 2) {
 			return false;
 		}
 		uint32_t raw = ((uint32_t)slot->reg_values[0] << 16) | slot->reg_values[1];
+		float f = 0.0f;
+		memcpy(&f, &raw, sizeof(f));
+		slot->numeric_value = (double)f;
+		snprintf(slot->text_value, sizeof(slot->text_value), "%g", slot->numeric_value);
+		return true;
+	}
+
+	// 32 位浮点数（IEEE754，低字在前）
+	if (slot->data_type == 6) {
+		if (contiguous < 2) {
+			return false;
+		}
+		uint32_t raw = ((uint32_t)slot->reg_values[1] << 16) | slot->reg_values[0];
 		float f = 0.0f;
 		memcpy(&f, &raw, sizeof(f));
 		slot->numeric_value = (double)f;
@@ -1863,6 +1918,7 @@ static bool parse_modbus_response(uint8_t channel, uint8_t *data, size_t len)
 	
 	dbg_printf("[Modbus Resp] Matched! Addr:%02X Func:%02X ByteCount:%d Ch:%u\n",
 	           slave_addr, function_code, byte_count, channel);
+	s_waiting_haas_th = false;
 	
 	// 根据功能码分别提取数据
 	if (function_code == 0x03 || function_code == 0x04) {
@@ -2281,17 +2337,19 @@ printf("uart1 send data is:");
 		time_t now_time = time(NULL);
 		s_haas_data_send_time = now_time;
 		s_waiting_haas_th = true;
-		while(s_waiting_haas_th) 
-		{
-			time_t now_time = time(NULL);
+		useconds_t waited_us = 0;
+		while (s_waiting_haas_th) {
 			if (tx_uart >= 1 && tx_uart <= 2 && s_uart_control_pending[tx_uart]) {
 				dbg_printf("[Modbus Poll] uart%u interrupted by control, exit wait\n", tx_uart);
 				s_waiting_haas_th = false;
 				break;
 			}
-			if (now_time - s_haas_data_send_time >= 3) {
+			if (waited_us >= k_modbus_wait_timeout_us) {
 				s_waiting_haas_th = false;
+				break;
 			}
+			usleep(k_modbus_wait_step_us);
+			waited_us += k_modbus_wait_step_us;
 		}
 
 		uart_channel_unlock(tx_uart);
@@ -2394,7 +2452,7 @@ void haas_data_display_cmd(void)
 	 }
 }
 
-void haas_data_upload(void)
+void haas_data_payload_dump(void)
 {
 	uint8_t *send_data_p = NULL;
 	size_t send_data_len = 0;
@@ -2437,7 +2495,7 @@ void haas_data_upload(void)
 			               key,
 			               dev->value_text);
 		} else {
-			len += snprintf(payload + len, sizeof(payload) - len, "%s:%.6g",
+			len += snprintf(payload + len, sizeof(payload) - len, "%s:%.3g",
 			               key,
 			               dev->value_numeric);
 		}
@@ -2462,7 +2520,7 @@ void haas_data_upload(void)
 	send_data_len = len;
 
 	if (send_data_len > 0 && send_data_len < sizeof(payload)) {
-		printf("[haas_data_upload] payload: %s\n", payload);
+	printf("[haas_data_payload_dump] payload: %s\n", payload);
 		// uart_tx(2, send_data_p, send_data_len);
 	}
 }

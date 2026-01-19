@@ -826,7 +826,7 @@ void *cmd_main(void *args)
 			haas_data_read();
 			sleep(1);
 		}
-		sleep(1);
+		//sleep(1);
 		//data_send_test();
 		DATA_FUNCTION_INTERVAL_S = GetIniKeyInt("config", "upload_time", FILENAME);
 		printf("upload data interval:%d\r\n",DATA_FUNCTION_INTERVAL_S);
@@ -835,7 +835,7 @@ void *cmd_main(void *args)
 				haas_energy_type2_full_read();
 				sleep(1);
 			}
-			haas_data_upload();
+			haas_data_payload_dump();
 			s_cmd_last_run_time = now_time;
 		}
 	//	if (now_time - s_humi_last_save_time >= HUMI_SAVE_INTERVAL_S){
