@@ -269,7 +269,7 @@ typedef struct __bt_notify_data
 
 extern DEVICE_485_type g_485_device_type;
 extern uint8_t dev_type;
-extern HAAS_DEV_RS485 g_haas_dev_rs485[50];
+extern HAAS_DEV_RS485 g_haas_dev_rs485[100];
 
 extern uint8_t haas_device_num;
 extern uint8_t device_no;

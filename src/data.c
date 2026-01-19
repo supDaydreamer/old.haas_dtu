@@ -15,7 +15,11 @@
 DEVICE_485_type g_485_device_type = DEVICE_485_NO_DEVICE;
 uint8_t dev_type = 0;
 
-HAAS_DEV_RS485 g_haas_dev_rs485[50];
+HAAS_DEV_RS485 g_haas_dev_rs485[100];
+#define HAAS_DEV_RS485_MAX (sizeof(g_haas_dev_rs485) / sizeof(g_haas_dev_rs485[0]))
+static double s_value2_filter_th = 0.0;
+static double s_value2_last[HAAS_DEV_RS485_MAX];
+static bool s_value2_last_valid[HAAS_DEV_RS485_MAX];
 uint8_t haas_device_num = 0;
 uint8_t device_no = 0;
 time_t s_haas_data_send_time = 0;
@@ -109,6 +113,8 @@ static uint32_t read_energy_window_from_config(void);
 static size_t build_type2_gain_frame(uint16_t reg_addr, float gain, uint8_t *out_buf, size_t buf_len);
 static void update_energy_window(uint16_t reg_addr, uint8_t cmd, const RegisterData *slot, bool aggregated);
 static void send_clear_frames(void);
+
+static void filter_value2_by_delta(uint8_t index, HAAS_DEV_RS485 *dev);
 
 static float read_gain_from_config(const char *key, float default_gain)
 {
@@ -713,8 +719,53 @@ void humi_process(uint8_t *data, size_t len)
 	}
 }
 
-void haas_device_dataRead(uint8_t *data)
+
+static void filter_value2_by_delta(uint8_t index, HAAS_DEV_RS485 *dev)
 {
+	if (dev == NULL || dev->is_string || s_value2_filter_th <= 0.0) {
+		return;
+	}
+	if (index >= HAAS_DEV_RS485_MAX) {
+		return;
+	}
+	if (!s_value2_last_valid[index]) {
+		s_value2_last[index] = dev->value2;
+		s_value2_last_valid[index] = true;
+		return;
+	}
+
+	double diff = dev->value2 - s_value2_last[index];
+	if (diff < 0.0) {
+		diff = -diff;
+	}
+	if (diff > s_value2_filter_th) {
+		dev->value2 = s_value2_last[index];
+		return;
+	}
+	s_value2_last[index] = dev->value2;
+}
+
+
+void haas_device_dataRead(uint8_t *data, size_t len)
+{
+//	if((data[0] == 0x03) && (data[1] == 0x10))
+//		{
+	//	  snprintf(WorkOrder.WorkOrder_No,12,data[7]);
+//		  for(int i=0;i<12;i++)
+//		  {
+//			  WorkOrder.WorkOrder_No[i] = data[i+7];
+//		  }
+//		  if(WorkOrder.WorkOrder_No[0] == 'M')
+//		  {
+//			printf("receive WorkOrder.WorkOrder_No:%s\r\n",WorkOrder.WorkOrder_No);
+//			http_req_f = 1;
+//		  }
+//		  return;
+//		}
+	if (len < 5 || !check_modbus_crc(data, len)) {
+		return;
+	}
+
 	if((data[1] == 0x03)&&(device_no > 0))
 	{
 	uint8_t addr = device_no - 1;
@@ -798,7 +849,7 @@ void haas_device_dataRead(uint8_t *data)
 		     g_haas_dev_rs485[addr].value2 = g_haas_dev_rs485[addr].value1/10.0;
 		  }
 		}
-		g_haas_dev_rs485[addr].value_valid = 1;
+		filter_value2_by_delta(addr, &g_haas_dev_rs485[addr]);
 		printf("receive data is:%d,%.1f\r\n",g_haas_dev_rs485[addr].value1,g_haas_dev_rs485[addr].value2);
 		s_waiting_haas_th = false;
 	}
@@ -817,12 +868,15 @@ void on_uart_2_read(uint8_t *data, size_t len)
 		dbg_printf("%02X ", data[i]);
 	}
 	dbg_printf("\n=======------------------=========\n");
-
+	if (RS485_type == 0 && dev_type == 0) {
+		haas_device_dataRead(data, len);
+	}
 	if (RS485_type == 1) {
+		process_modbus_sniffer_data(2, data, len);
 		/* 如果收到目标序列的前10字节，则发送指定响应 10 次，每次间隔 50ms
 		 * 触发序列（前10字节）：03 10 00 00 00 06 0C 4D 4F 32
 		 * 响应帧（9字节）：06 03 04 00 09 30 31 89 25
-		 */
+		 
 		static const uint8_t _trigger_prefix[10] = {
 			0x03, 0x10, 0x00, 0x00, 0x00, 0x06, 0x0C, 0x4D, 0x4F, 0x32
 		};
@@ -831,17 +885,15 @@ void on_uart_2_read(uint8_t *data, size_t len)
 		};
 
 		if (len >= 10 && memcmp(data, _trigger_prefix, 10) == 0) {
-			/* 发送10次响应，每次间隔50ms */
+			
 			for (int _i = 0; _i < 10; ++_i) {
 				uart_tx(1, (uint8_t*)_response_frame, sizeof(_response_frame));
-				/* 使用 usleep 以毫秒为单位等待 50ms */
 				usleep(50 * 1000);
 			}
-		}
+		}*/
 		return;
 	}
-
-	process_modbus_sniffer_data(2, data, len);
+	process_modbus_sniffer_data(2, data, len);	
 }
 
 void on_uart_1_write(uint8_t *data, size_t len)
@@ -1295,7 +1347,7 @@ void on_uart_1_read(uint8_t *data, size_t len)
 	extern uint8_t dev_type;
 	extern uint8_t RS485_type;
 	if (RS485_type == 0 && dev_type == 0) {
-		haas_device_dataRead(data);
+		haas_device_dataRead(data, len);
 	}
 }
 
