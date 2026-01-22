@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include "common.h"
 #include "data.h"
 #include "uart.h"
@@ -93,6 +94,20 @@ static const uint8_t kHumiAutoModeFrame[] = {0x01, 0x06, 0x00, 0x12, 0x00, 0x00,
 static const uint8_t kHumiSetpoint50Frame[] = {0x01, 0x06, 0x00, 0x01, 0x00, 0x32, 0x59, 0xDF};
 static const uint8_t kHumiPowerOnFrame[] = {0x00, 0x06, 0x00, 0xEE, 0x00, 0xAA, 0x68, 0x51};
 
+static const uint8_t kScaleSlaveAddr = 0x01;
+static const uint8_t kScaleFunc = 0x03;
+static const uint16_t kScaleStateStartReg = 0x0030;
+static const uint16_t kScaleStateRegCount = 0x0002;
+static const uint16_t kScaleWeightStartReg = 0x0070;
+static const uint16_t kScaleWeightRegCount = 0x0008;
+static const uint16_t kScaleTotalStartReg = 0x0074;
+static const uint16_t kScaleLimitStartReg = 0x0015;
+static const uint16_t kScaleLimitRegCount = 0x0002;
+static const uint32_t kScaleWeightIntervalMs = 500;
+static const uint32_t kScaleStateIntervalMs = 5000;
+static const uint32_t kScaleLimitIntervalMs = 60000;
+static const uint32_t kScaleRespTimeoutMs = 500;
+
 // Modbus监测函数前向声明
 static bool check_modbus_crc(uint8_t *data, size_t len);
 static bool parse_modbus_request(uint8_t *data, size_t len, ModbusRequest *req);
@@ -108,6 +123,9 @@ static uint16_t clamp_data_len(uint16_t requested_len);
 static bool recalc_register_outputs(RegisterData *slot);
 static void sync_register_to_rs485(int index, RegisterData *slot, const RegisterMap *map,
                                    bool aggregated, uint16_t last_word);
+static uint64_t get_time_ms(void);
+static void send_scale_read_request(uint8_t slave_addr, uint16_t reg_addr, uint16_t reg_count,
+                                    uint8_t cmd, uint8_t tx_uart, const char *label);
 static float read_gain_from_config(const char *key, float default_gain);
 static uint32_t read_energy_window_from_config(void);
 static size_t build_type2_gain_frame(uint16_t reg_addr, float gain, uint8_t *out_buf, size_t buf_len);
@@ -115,6 +133,24 @@ static void update_energy_window(uint16_t reg_addr, uint8_t cmd, const RegisterD
 static void send_clear_frames(void);
 
 static void filter_value2_by_delta(uint8_t index, HAAS_DEV_RS485 *dev);
+
+static uint64_t get_time_ms(void)
+{
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)tv.tv_usec / 1000ULL;
+}
+
+static bool has_pending_request(uint8_t channel)
+{
+	for (int i = 0; i < MAX_PENDING_REQUESTS; i++) {
+		if (g_pending_requests[i].is_valid &&
+		    g_pending_requests[i].channel == channel) {
+			return true;
+		}
+	}
+	return false;
+}
 
 static float read_gain_from_config(const char *key, float default_gain)
 {
@@ -440,6 +476,120 @@ const char read_haas_temp_cmd[] = {0x05,0x03,0x10,0x00,0x00,0x04,0x41,0x4d};
 static bool s_waiting_haas_th = false;
 //static bool s_waiting_haas_temp = false;
 static int s_fan_value = -1;
+static volatile bool s_scale_upload_pending = false;
+static uint32_t s_scale_last_total = 0;
+static bool s_scale_total_inited = false;
+
+static void send_scale_read_request(uint8_t slave_addr, uint16_t reg_addr, uint16_t reg_count,
+                                    uint8_t cmd, uint8_t tx_uart, const char *label)
+{
+	uint16_t quantity = reg_count ? reg_count : 1;
+	uint8_t frame[8] = {0};
+	frame[0] = slave_addr;
+	frame[1] = cmd;
+	frame[2] = (reg_addr >> 8) & 0xFF;
+	frame[3] = reg_addr & 0xFF;
+	frame[4] = (quantity >> 8) & 0xFF;
+	frame[5] = quantity & 0xFF;
+
+	uint16_t crc = ModbusCrc(frame, 6);
+	frame[6] = crc & 0xFF;
+	frame[7] = (crc >> 8) & 0xFF;
+
+	dbg_printf("[Scale Poll] %s Addr:0x%02X Reg:0x%04X Cmd:0x%02X Qty:%u\n",
+	           label ? label : "read", slave_addr, reg_addr, cmd, quantity);
+	uart_tx(tx_uart, frame, sizeof(frame));
+
+	ModbusRequest req = {
+		.slave_addr = slave_addr,
+		.function_code = cmd,
+		.channel = tx_uart,
+		.start_reg = reg_addr,
+		.reg_count = quantity,
+		.timestamp = time(NULL),
+		.is_valid = true
+	};
+	add_pending_request(&req);
+
+	s_haas_data_send_time = time(NULL);
+	s_waiting_haas_th = true;
+
+	uint64_t start_ms = get_time_ms();
+	while (s_waiting_haas_th) {
+		if (tx_uart >= 1 && tx_uart <= 2 && s_uart_control_pending[tx_uart]) {
+			dbg_printf("[Scale Poll] uart%u interrupted by control, exit wait\n", tx_uart);
+			s_waiting_haas_th = false;
+			break;
+		}
+		if (get_time_ms() - start_ms >= kScaleRespTimeoutMs) {
+			s_waiting_haas_th = false;
+			break;
+		}
+		usleep(20 * 1000);
+	}
+}
+
+void haas_scale_poll(void)
+{
+	static uint64_t last_state_ms = 0;
+	static uint64_t last_weight_ms = 0;
+	static uint64_t last_limit_ms = 0;
+	uint64_t now_ms = get_time_ms();
+	uint8_t tx_uart = 1;
+
+	ensure_register_map_initialized();
+	cleanup_timeout_requests();
+	if (has_pending_request(tx_uart)) {
+		return;
+	}
+
+	if (last_state_ms == 0) {
+		last_state_ms = now_ms - kScaleStateIntervalMs;
+		last_weight_ms = now_ms - kScaleWeightIntervalMs;
+		last_limit_ms = now_ms - kScaleLimitIntervalMs;
+	}
+
+	bool due_limit = (now_ms - last_limit_ms) >= kScaleLimitIntervalMs;
+	bool due_state = (now_ms - last_state_ms) >= kScaleStateIntervalMs;
+	bool due_weight = (now_ms - last_weight_ms) >= kScaleWeightIntervalMs;
+
+	if (!due_limit && !due_state && !due_weight) {
+		return;
+	}
+
+	bool locked = false;
+	for (int retry = 0; retry < 10; retry++) {
+		if (tx_uart >= 1 && tx_uart <= 2 && s_uart_control_pending[tx_uart]) {
+			usleep(50 * 1000);
+			continue;
+		}
+		locked = uart_channel_try_lock(tx_uart);
+		if (locked) {
+			break;
+		}
+		usleep(50 * 1000);
+	}
+	if (!locked) {
+		dbg_printf("[Scale Poll] uart%u busy, skip this round\n", tx_uart);
+		return;
+	}
+
+	if (due_limit) {
+		send_scale_read_request(kScaleSlaveAddr, kScaleLimitStartReg, kScaleLimitRegCount,
+		                        kScaleFunc, tx_uart, "limit");
+		last_limit_ms = now_ms;
+	} else if (due_state) {
+		send_scale_read_request(kScaleSlaveAddr, kScaleStateStartReg, kScaleStateRegCount,
+		                        kScaleFunc, tx_uart, "state");
+		last_state_ms = now_ms;
+	} else if (due_weight) {
+		send_scale_read_request(kScaleSlaveAddr, kScaleWeightStartReg, kScaleWeightRegCount,
+		                        kScaleFunc, tx_uart, "weight");
+		last_weight_ms = now_ms;
+	}
+
+	uart_channel_unlock(tx_uart);
+}
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Modbus监测相关全局变量
@@ -1675,7 +1825,7 @@ static void store_register_data(uint8_t slave_addr, uint16_t reg_addr, uint16_t 
 
 	if (offset == 1 &&
 	    (map->data_type == 1 || map->data_type == 3 || map->data_type == 4 ||
-	     map->data_type == 5 || map->data_type == 6)) {
+	     map->data_type == 5 || map->data_type == 6 || map->data_type == 7)) {
 		dbg_printf("[Modbus Store] %s Word0:0x%04X Word1:0x%04X cmd:0x%02X (slot %d)\n",
 		           map->name, slot->reg_values[0], slot->reg_values[1], cmd, map_index);
 		uint32_t raw_hi = ((uint32_t)slot->reg_values[0] << 16) | slot->reg_values[1];
@@ -1695,6 +1845,18 @@ static void store_register_data(uint8_t slave_addr, uint16_t reg_addr, uint16_t 
 	}
 
 	bool aggregated = recalc_register_outputs(slot);
+	if (dev_type == 4 && aggregated &&
+	    map->cmd == 0x03 &&
+	    map->reg_addr == kScaleTotalStartReg &&
+	    map->data_len >= 2 &&
+	    map->data_type == 5) {
+		uint32_t total = (uint32_t)slot->numeric_value;
+		if (!s_scale_total_inited || total != s_scale_last_total) {
+			s_scale_last_total = total;
+			s_scale_total_inited = true;
+			s_scale_upload_pending = true;
+		}
+	}
 	sync_register_to_rs485(map_index, slot, map, aggregated, value);
 	update_energy_window(map->reg_addr, cmd, slot, aggregated);
 
@@ -1702,6 +1864,9 @@ static void store_register_data(uint8_t slave_addr, uint16_t reg_addr, uint16_t 
 		dbg_printf("[Modbus Store] %s ASCII=\"%s\" offset:%u cmd:0x%02X (slot %d)\n",
 		           map->name, slot->text_value, offset, cmd, map_index);
 	} else if (map->data_type == 3 && aggregated) {
+		dbg_printf("[Modbus Store] %s Value(signed32)=%s offset:%u cmd:0x%02X (slot %d)\n",
+		           map->name, slot->text_value, offset, cmd, map_index);
+	} else if (map->data_type == 7 && aggregated) {
 		dbg_printf("[Modbus Store] %s Value(signed32)=%s offset:%u cmd:0x%02X (slot %d)\n",
 		           map->name, slot->text_value, offset, cmd, map_index);
 	} else if (map->data_type == 4 && aggregated) {
@@ -1782,16 +1947,25 @@ static bool recalc_register_outputs(RegisterData *slot)
 	}
 
 	// 32 位整型需要两个寄存器拼接，输出十进制字符串
-	if (slot->data_type == 1 || slot->data_type == 3) {
+	if (slot->data_type == 1 || slot->data_type == 3 || slot->data_type == 7) {
 		if (contiguous < 2) {
 			return false;
 		}
-		uint32_t raw = ((uint32_t)slot->reg_values[0] << 16) | slot->reg_values[1];
+		uint32_t raw = 0;
+		if (slot->data_type == 7) {
+			raw = ((uint32_t)slot->reg_values[1] << 16) | slot->reg_values[0];
+		} else {
+			raw = ((uint32_t)slot->reg_values[0] << 16) | slot->reg_values[1];
+		}
 
 		if (slot->data_type == 3) {
 			int32_t signed_val = (int32_t)raw;
 			slot->numeric_value = ((double)signed_val) / 10.0;
 			snprintf(slot->text_value, sizeof(slot->text_value), "%.1f", slot->numeric_value);
+		} else if (slot->data_type == 7) {
+			int32_t signed_val = (int32_t)raw;
+			slot->numeric_value = (double)signed_val;
+			snprintf(slot->text_value, sizeof(slot->text_value), "%d", signed_val);
 		} else {
 			slot->numeric_value = (double)raw;
 			snprintf(slot->text_value, sizeof(slot->text_value), "%u", raw);
@@ -1967,6 +2141,7 @@ static bool parse_modbus_response(uint8_t channel, uint8_t *data, size_t len)
 	
 	// 清除已匹配的请求
 	req->is_valid = false;
+	s_waiting_haas_th = false;
 	
 	return true;
 }
@@ -2674,7 +2849,15 @@ void *data_main()
 #if 1
 		time_t now_time = time(NULL);
 
-		if(now_time - s_mqtt_dataUpload_time >= s_mqtt_upload_interval_s)
+		if (dev_type == 4) {
+			if (s_scale_upload_pending) {
+				mqtt_data_upload();
+				haas_mqtt_data_upload();
+				s_scale_upload_pending = false;
+				s_mqtt_dataUpload_time = now_time;
+				printf("scale upload triggered by total count change\r\n");
+			}
+		} else if(now_time - s_mqtt_dataUpload_time >= s_mqtt_upload_interval_s)
 		{
 			mqtt_data_upload();
 			haas_mqtt_data_upload();

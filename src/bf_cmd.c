@@ -796,6 +796,7 @@ void *cmd_main(void *args)
 //	energy_init();
 
 //	s_humi_last_save_time = time(NULL);
+	sleep(2);
 
 	while (1) {
 		get_Tywifi_status();
@@ -818,6 +819,9 @@ void *cmd_main(void *args)
 					haas_energy_type2_window_cycle();
 					s_window_last_time = now_time;
 				}
+			} else if (dev_type == 4) {
+				haas_scale_poll();
+				usleep(20 * 1000);
 			} else {
 				haas_data_read();
 				sleep(1);
@@ -829,7 +833,6 @@ void *cmd_main(void *args)
 		//sleep(1);
 		//data_send_test();
 		DATA_FUNCTION_INTERVAL_S = GetIniKeyInt("config", "upload_time", FILENAME);
-		printf("upload data interval:%d\r\n",DATA_FUNCTION_INTERVAL_S);
 		if (now_time - s_cmd_last_run_time >= DATA_FUNCTION_INTERVAL_S){
 			if (RS485_type == 0 && dev_type == 3) {
 				haas_energy_type2_full_read();

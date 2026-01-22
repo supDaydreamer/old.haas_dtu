@@ -44,7 +44,7 @@ typedef struct {
     uint8_t slave_addr;        // 从机地址
     uint16_t reg_addr;         // 起始寄存器地址
     uint8_t cmd;               // Modbus功能码
-    uint8_t data_type;         // 数据类型: 0=uint16, 1=uint32(HL), 2=ASCII, 3=int32/10(HL), 4=float32(HL), 5=uint32(LH), 6=float32(LH)
+    uint8_t data_type;         // 数据类型: 0=uint16, 1=uint32(HL), 2=ASCII, 3=int32/10(HL), 4=float32(HL), 5=uint32(LH), 6=float32(LH), 7=int32(LH)
     uint16_t data_len;         // 连续寄存器数量
     uint16_t reg_values[REGISTER_VALUE_MAX_BYTES / 2]; // 每个寄存器的最新原始值
     uint32_t reg_ready_mask;   // 已更新寄存器位图
@@ -72,7 +72,7 @@ typedef struct {
     uint8_t slave_addr;        // 从机地址
     uint16_t reg_addr;         // 起始寄存器地址
     char name[32];             // 寄存器名称
-    uint8_t data_type;         // 数据类型: 0=uint16, 1=uint32(HL), 2=ASCII, 3=int32/10(HL), 4=float32(HL), 5=uint32(LH), 6=float32(LH)
+    uint8_t data_type;         // 数据类型: 0=uint16, 1=uint32(HL), 2=ASCII, 3=int32/10(HL), 4=float32(HL), 5=uint32(LH), 6=float32(LH), 7=int32(LH)
     uint8_t cmd;               // 功能码
     uint16_t data_len;         // 连续寄存器数量
     bool enabled;              // 是否启用监测
@@ -307,6 +307,7 @@ void on_haas_time_receive(HAAS_TIME haas_time);
 void energy_init();
 void energy_read();
 void haas_data_read();
+void haas_scale_poll();
 void haas_data_payload_dump();
 int get_fan_value(void);
 void haas_data_detect();
