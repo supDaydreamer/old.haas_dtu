@@ -686,7 +686,7 @@ sprintf(s_data,"{");
 			                "\t\"V0%d\": \"%s\",\r\n", i + 1, dev->value_text);
 			} else {
 				len1 = snprintf(s_data + len, sizeof(s_data) - len,
-			                "\t\"V0%d\": %.3f,\r\n", i + 1, dev->value2);
+			                "\t\"V0%d\": %d,\r\n", i + 1, (int)dev->value2);
 			}
 		}
 		else
@@ -699,7 +699,7 @@ sprintf(s_data,"{");
 			                "\t\"V%d\": \"%s\",\r\n", i + 1, dev->value_text);
 			} else {
 				len1 = snprintf(s_data + len, sizeof(s_data) - len,
-			                "\t\"V%d\": %.3f,\r\n", i + 1, dev->value2);
+			                "\t\"V%d\": %d,\r\n", i + 1, (int)dev->value2);
 			}
 		}
 		if (len1 < 0) {
@@ -857,10 +857,10 @@ if (g_energy_window_value_ready) {
 	int dev_num = dev_idx + 1;
 	if (dev_num < 10) {
 		len1 = snprintf(s_data + len, sizeof(s_data) - len,
-		                "\t\"V0%d\": %.1f,\r\n", dev_num, g_energy_window_value_wh);
+		                "\t\"V0%d\": %d,\r\n", dev_num, (int)g_energy_window_value_wh);
 	} else {
 		len1 = snprintf(s_data + len, sizeof(s_data) - len,
-		                "\t\"V%d\": %.1f,\r\n", dev_num, g_energy_window_value_wh);
+		                "\t\"V%d\": %d,\r\n", dev_num, (int)g_energy_window_value_wh);
 	}
 	if (len1 < 0) {
 		len1 = 0;

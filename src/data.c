@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include "common.h"
 #include "data.h"
 #include "uart.h"
@@ -22,7 +23,13 @@ static double s_value2_last[HAAS_DEV_RS485_MAX];
 static bool s_value2_last_valid[HAAS_DEV_RS485_MAX];
 uint8_t haas_device_num = 0;
 uint8_t device_no = 0;
-time_t s_haas_data_send_time = 0;
+
+static uint64_t now_ms(void)
+{
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return (uint64_t)tv.tv_sec * 1000 + (uint64_t)(tv.tv_usec / 1000);
+}
 
 uint16_t DATA_FUNCTION_INTERVAL_S = 300;
 
@@ -868,11 +875,11 @@ void on_uart_2_read(uint8_t *data, size_t len)
 		dbg_printf("%02X ", data[i]);
 	}
 	dbg_printf("\n=======------------------=========\n");
-	if (RS485_type == 0 && dev_type == 0) {
-		haas_device_dataRead(data, len);
-	}
-	if (RS485_type == 1) {
-		process_modbus_sniffer_data(2, data, len);
+	//if (RS485_type == 0 && dev_type == 0) {
+	//	haas_device_dataRead(data, len);
+	//}
+	//if (RS485_type == 1) {
+	//	process_modbus_sniffer_data(2, data, len);
 		/* 如果收到目标序列的前10字节，则发送指定响应 10 次，每次间隔 50ms
 		 * 触发序列（前10字节）：03 10 00 00 00 06 0C 4D 4F 32
 		 * 响应帧（9字节）：06 03 04 00 09 30 31 89 25
@@ -891,8 +898,8 @@ void on_uart_2_read(uint8_t *data, size_t len)
 				usleep(50 * 1000);
 			}
 		}*/
-		return;
-	}
+	//	return;
+	//}
 	process_modbus_sniffer_data(2, data, len);	
 }
 
@@ -1344,11 +1351,11 @@ void on_uart_1_read(uint8_t *data, size_t len)
 	process_modbus_sniffer_data(1, data, len);
 
 	// 主动模式且温湿设备走 haas_device_dataRead
-	extern uint8_t dev_type;
-	extern uint8_t RS485_type;
-	if (RS485_type == 0 && dev_type == 0) {
-		haas_device_dataRead(data, len);
-	}
+	//extern uint8_t dev_type;
+	//extern uint8_t RS485_type;
+	//if (RS485_type == 0 && dev_type == 0) {
+	//	haas_device_dataRead(data, len);
+	//}
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -1967,6 +1974,7 @@ static bool parse_modbus_response(uint8_t channel, uint8_t *data, size_t len)
 	
 	// 清除已匹配的请求
 	req->is_valid = false;
+	s_waiting_haas_th = false;
 	
 	return true;
 }
@@ -2277,7 +2285,8 @@ printf("uart1 send data is:");
 		device_no = i+1;
 		g_haas_dev_rs485[i].index = i+1;
 
-		uint8_t tx_uart = (dev_type == 2 || dev_type == 1) ? 1 : 2;
+		uint8_t tx_uart = 1;
+		//uint8_t tx_uart = (dev_type == 2 || dev_type == 1) ? 1 : 2;
 		bool locked = false;
 		for (int retry = 0; retry < 10; retry++) {
 			if (tx_uart >= 1 && tx_uart <= 2 && s_uart_control_pending[tx_uart]) {
@@ -2330,26 +2339,24 @@ printf("uart1 send data is:");
 		add_pending_request(&req);
 		
 		// 等待响应
-		time_t now_time = time(NULL);
-		s_haas_data_send_time = now_time;
+		uint64_t start_ms = now_ms();
 		s_waiting_haas_th = true;
 		while (s_waiting_haas_th) 
 		{
-			time_t now_time = time(NULL);
 			if (tx_uart >= 1 && tx_uart <= 2 && s_uart_control_pending[tx_uart]) {
 				dbg_printf("[Modbus Poll] uart%u interrupted by control, exit wait\n", tx_uart);
 				s_waiting_haas_th = false;
 				break;
 			}
-			if (now_time - s_haas_data_send_time >= 1) {
+			if (now_ms() - start_ms >= 1000) {
 				s_waiting_haas_th = false;
+				break;
 			}
+			usleep(10 * 1000);
 		}
 
 		uart_channel_unlock(tx_uart);
-//	}
-
-	//sleep(2);
+		usleep(500 * 1000);
 	}
 #endif
 

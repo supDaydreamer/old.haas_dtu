@@ -796,8 +796,8 @@ void *cmd_main(void *args)
 //	energy_init();
 
 //	s_humi_last_save_time = time(NULL);
-
-	while (1) {
+	sleep(2);
+	while(1) {
 		get_Tywifi_status();
 		time_t now_time = time(NULL);
 		if (RS485_type == 1) {
