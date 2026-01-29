@@ -1069,12 +1069,14 @@ void data_init()
 	g_bf_code = get_bf_code();
 	g_version = get_version();
 
+	bool config_file_exists = (0 == access(CONFIG_FILE, F_OK));
+
 	if (0 == access(FILENAME, F_OK)) {
 		dev_type = (uint8_t)GetIniKeyInt("config", "dev_type", FILENAME);
 		dbg_printf(">>> read dev_type: %d\n", dev_type);
 
 		if (dev_type != 4) {
-			if (0 == access(CONFIG_FILE, F_OK)) {
+			if (config_file_exists) {
 				g_485_device_type = GetIniKeyInt("cfg", "device_type", CONFIG_FILE);
 				dbg_printf(">>> read device_type: %u\n", g_485_device_type);
 			} else {
@@ -1118,6 +1120,12 @@ void data_init()
 		haas_device_num = GetIniKeyInt("config", "haas_dev_num", FILENAME);
 		dbg_printf(">>> read haas_dev_num: %u\n", haas_device_num);
 	} else {
+		if (config_file_exists) {
+			g_485_device_type = GetIniKeyInt("cfg", "device_type", CONFIG_FILE);
+			dbg_printf(">>> read device_type: %u\n", g_485_device_type);
+		} else {
+			dbg_printf(">>> no config file!\n");
+		}
 		dbg_printf(">>> no device.conf, dev_type default 0\n");
 		DATA_FUNCTION_INTERVAL_S = DATA_MQTT_INTERVAL_S;
 		s_mqtt_upload_interval_s = DATA_MQTT_INTERVAL_S;
