@@ -100,12 +100,11 @@ static const uint16_t kScaleStateStartReg = 0x0030;
 static const uint16_t kScaleStateRegCount = 0x0002;
 static const uint16_t kScaleWeightStartReg = 0x0070;
 static const uint16_t kScaleWeightRegCount = 0x0008;
-static const uint16_t kScaleTotalStartReg = 0x0074;
 static const uint16_t kScaleLimitStartReg = 0x0015;
 static const uint16_t kScaleLimitRegCount = 0x0002;
-static const uint32_t kScaleWeightIntervalMs = 500;
-static const uint32_t kScaleStateIntervalMs = 5000;
-static const uint32_t kScaleLimitIntervalMs = 60000;
+static uint32_t s_scale_weight_interval_ms = 300;
+static uint32_t s_scale_state_interval_ms = 600000;
+static uint32_t s_scale_limit_interval_ms = 600000;
 static const uint32_t kScaleRespTimeoutMs = 500;
 
 // Modbus监测函数前向声明
@@ -477,8 +476,9 @@ static bool s_waiting_haas_th = false;
 //static bool s_waiting_haas_temp = false;
 static int s_fan_value = -1;
 static volatile bool s_scale_upload_pending = false;
-static uint32_t s_scale_last_total = 0;
-static bool s_scale_total_inited = false;
+static int s_scale_upload_map_index = -1;
+static uint32_t s_scale_trigger_last = 0;
+static bool s_scale_trigger_inited = false;
 
 static void send_scale_read_request(uint8_t slave_addr, uint16_t reg_addr, uint16_t reg_count,
                                     uint8_t cmd, uint8_t tx_uart, const char *label)
@@ -544,14 +544,14 @@ void haas_scale_poll(void)
 	}
 
 	if (last_state_ms == 0) {
-		last_state_ms = now_ms - kScaleStateIntervalMs;
-		last_weight_ms = now_ms - kScaleWeightIntervalMs;
-		last_limit_ms = now_ms - kScaleLimitIntervalMs;
+		last_state_ms = now_ms - s_scale_state_interval_ms;
+		last_weight_ms = now_ms - s_scale_weight_interval_ms;
+		last_limit_ms = now_ms - s_scale_limit_interval_ms;
 	}
 
-	bool due_limit = (now_ms - last_limit_ms) >= kScaleLimitIntervalMs;
-	bool due_state = (now_ms - last_state_ms) >= kScaleStateIntervalMs;
-	bool due_weight = (now_ms - last_weight_ms) >= kScaleWeightIntervalMs;
+	bool due_limit = (now_ms - last_limit_ms) >= s_scale_limit_interval_ms;
+	bool due_state = (now_ms - last_state_ms) >= s_scale_state_interval_ms;
+	bool due_weight = (now_ms - last_weight_ms) >= s_scale_weight_interval_ms;
 
 	if (!due_limit && !due_state && !due_weight) {
 		return;
@@ -1095,6 +1095,23 @@ void data_init()
 		s_mqtt_upload_interval_s = (uint32_t)upload_time_s;
 		dbg_printf(">>> read upload_time: %u\n", upload_time_s);
 
+		int scale_weight_ms = GetIniKeyInt("config", "scale_weight_interval_ms", FILENAME);
+		if (scale_weight_ms > 0) {
+			s_scale_weight_interval_ms = (uint32_t)scale_weight_ms;
+		}
+		int scale_state_ms = GetIniKeyInt("config", "scale_state_interval_ms", FILENAME);
+		if (scale_state_ms > 0) {
+			s_scale_state_interval_ms = (uint32_t)scale_state_ms;
+		}
+		int scale_limit_ms = GetIniKeyInt("config", "scale_limit_interval_ms", FILENAME);
+		if (scale_limit_ms > 0) {
+			s_scale_limit_interval_ms = (uint32_t)scale_limit_ms;
+		}
+		dbg_printf(">>> read scale interval(ms): weight=%u state=%u limit=%u\n",
+		           s_scale_weight_interval_ms,
+		           s_scale_state_interval_ms,
+		           s_scale_limit_interval_ms);
+
 		extern uint8_t haas_device_num;
 		haas_device_num = GetIniKeyInt("config", "haas_dev_num", FILENAME);
 		dbg_printf(">>> read haas_dev_num: %u\n", haas_device_num);
@@ -1516,6 +1533,9 @@ static void init_register_map(void)
 	dbg_printf("[Modbus Monitor] Device count: %d\n", haas_device_num);
 
 	g_register_map_count = 0;
+	s_scale_upload_map_index = -1;
+	s_scale_trigger_inited = false;
+	s_scale_trigger_last = 0;
 
 	for (int i = 0; i < haas_device_num && i < MAX_REGISTER_MAP_SIZE; i++) {
 		char item_name[20];
@@ -1561,6 +1581,11 @@ static void init_register_map(void)
 		map->data_type = type;
 		map->data_len = effective_len;
 		map->enabled = true;
+		if (strcmp(map->name, "dev05") == 0) {
+			s_scale_upload_map_index = g_register_map_count;
+			s_scale_trigger_inited = false;
+			s_scale_trigger_last = 0;
+		}
 
 		dbg_printf("[Modbus Monitor] Loaded: %s -> Addr:0x%02X Reg:0x%04X Cmd:0x%02X Type:%d Len:%d\n",
 		           item_name, dev_add, reg_add, cmd, type, effective_len);
@@ -1845,15 +1870,16 @@ static void store_register_data(uint8_t slave_addr, uint16_t reg_addr, uint16_t 
 	}
 
 	bool aggregated = recalc_register_outputs(slot);
-	if (dev_type == 4 && aggregated &&
-	    map->cmd == 0x03 &&
-	    map->reg_addr == kScaleTotalStartReg &&
-	    map->data_len >= 2 &&
-	    map->data_type == 5) {
-		uint32_t total = (uint32_t)slot->numeric_value;
-		if (!s_scale_total_inited || total != s_scale_last_total) {
-			s_scale_last_total = total;
-			s_scale_total_inited = true;
+	if (dev_type == 4 && aggregated && map_index == s_scale_upload_map_index) {
+		uint32_t value32 = 0;
+		if (map->data_type == 5 && map->data_len >= 2) {
+			value32 = ((uint32_t)slot->reg_values[1] << 16) | slot->reg_values[0];
+		} else {
+			value32 = (uint32_t)slot->numeric_value;
+		}
+		if (!s_scale_trigger_inited || value32 != s_scale_trigger_last) {
+			s_scale_trigger_last = value32;
+			s_scale_trigger_inited = true;
 			s_scale_upload_pending = true;
 		}
 	}
@@ -2872,8 +2898,8 @@ void *data_main()
 	//		s_humi_last_save_time = now_time;
 	//	}
 #endif
-		haas_data_display_cmd();
-		sleep(2);
+		//haas_data_display_cmd();
+		//sleep(2);
 	}
 	return 0;
 }
