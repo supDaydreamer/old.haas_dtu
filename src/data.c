@@ -1069,31 +1069,33 @@ void data_init()
 	g_bf_code = get_bf_code();
 	g_version = get_version();
 
-	if (0 == access(CONFIG_FILE, F_OK)) {
-		g_485_device_type = GetIniKeyInt("cfg", "device_type", CONFIG_FILE);
-		dbg_printf(">>> read device_type: %u\n", g_485_device_type);
-	} else {
-		dbg_printf(">>> no config file!\n");
-	}
-
 	if (0 == access(FILENAME, F_OK)) {
 		dev_type = (uint8_t)GetIniKeyInt("config", "dev_type", FILENAME);
 		dbg_printf(">>> read dev_type: %d\n", dev_type);
 
-		g_energy_vt_gain = read_gain_from_config("vt_gain", 1.0f);
-		g_energy_ct_gain = read_gain_from_config("ct_gain", 1.0f);
-		dbg_printf(">>> read vt_gain: %.3f, ct_gain: %.3f\n", g_energy_vt_gain, g_energy_ct_gain);
+		if (dev_type != 4) {
+			if (0 == access(CONFIG_FILE, F_OK)) {
+				g_485_device_type = GetIniKeyInt("cfg", "device_type", CONFIG_FILE);
+				dbg_printf(">>> read device_type: %u\n", g_485_device_type);
+			} else {
+				dbg_printf(">>> no config file!\n");
+			}
 
-		g_energy_window_s = read_energy_window_from_config();
-		dbg_printf(">>> read energy_window_s: %u\n", g_energy_window_s);
+			g_energy_vt_gain = read_gain_from_config("vt_gain", 1.0f);
+			g_energy_ct_gain = read_gain_from_config("ct_gain", 1.0f);
+			dbg_printf(">>> read vt_gain: %.3f, ct_gain: %.3f\n", g_energy_vt_gain, g_energy_ct_gain);
 
-		int upload_time_s = GetIniKeyInt("config", "upload_time", FILENAME);
-		if (upload_time_s <= 0) {
-			upload_time_s = DATA_MQTT_INTERVAL_S;
+			g_energy_window_s = read_energy_window_from_config();
+			dbg_printf(">>> read energy_window_s: %u\n", g_energy_window_s);
+
+			int upload_time_s = GetIniKeyInt("config", "upload_time", FILENAME);
+			if (upload_time_s <= 0) {
+				upload_time_s = DATA_MQTT_INTERVAL_S;
+			}
+			DATA_FUNCTION_INTERVAL_S = upload_time_s;
+			s_mqtt_upload_interval_s = (uint32_t)upload_time_s;
+			dbg_printf(">>> read upload_time: %u\n", upload_time_s);
 		}
-		DATA_FUNCTION_INTERVAL_S = upload_time_s;
-		s_mqtt_upload_interval_s = (uint32_t)upload_time_s;
-		dbg_printf(">>> read upload_time: %u\n", upload_time_s);
 
 		int scale_weight_ms = GetIniKeyInt("config", "scale_weight_interval_ms", FILENAME);
 		if (scale_weight_ms > 0) {
