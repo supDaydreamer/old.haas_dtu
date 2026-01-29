@@ -475,10 +475,65 @@ const char read_haas_temp_cmd[] = {0x05,0x03,0x10,0x00,0x00,0x04,0x41,0x4d};
 static bool s_waiting_haas_th = false;
 //static bool s_waiting_haas_temp = false;
 static int s_fan_value = -1;
-static volatile bool s_scale_upload_pending = false;
 static int s_scale_upload_map_index = -1;
 static uint32_t s_scale_trigger_last = 0;
 static bool s_scale_trigger_inited = false;
+static volatile uint32_t s_scale_upload_q_head = 0;
+static volatile uint32_t s_scale_upload_q_tail = 0;
+static volatile uint32_t s_scale_upload_q_count = 0;
+static uint32_t s_scale_upload_q_drop = 0;
+#define SCALE_UPLOAD_QUEUE_SIZE 32
+#define SCALE_SNAPSHOT_MAX_ITEMS 32
+static uint8_t s_scale_snapshot_indices[SCALE_SNAPSHOT_MAX_ITEMS];
+static uint8_t s_scale_snapshot_count = 0;
+static bool s_scale_snapshot_needed = false;
+static uint8_t s_scale_snapshot_slave = 0;
+static uint8_t s_scale_snapshot_cmd = 0;
+
+typedef struct {
+	uint8_t index;
+	uint8_t value_valid;
+	uint8_t is_string;
+	float value2;
+	double value_numeric;
+	char value_text[64];
+} ScaleSnapshotItem;
+
+typedef struct {
+	uint8_t count;
+	ScaleSnapshotItem items[SCALE_SNAPSHOT_MAX_ITEMS];
+} ScaleSnapshot;
+
+static ScaleSnapshot s_scale_upload_queue[SCALE_UPLOAD_QUEUE_SIZE];
+
+static bool scale_upload_queue_push_snapshot(const ScaleSnapshot *snapshot)
+{
+	uint32_t count = __sync_fetch_and_add(&s_scale_upload_q_count, 0);
+	if (count >= SCALE_UPLOAD_QUEUE_SIZE) {
+		s_scale_upload_q_drop++;
+		return false;
+	}
+	uint32_t head = s_scale_upload_q_head;
+	memcpy(&s_scale_upload_queue[head], snapshot, sizeof(*snapshot));
+	__sync_synchronize();
+	s_scale_upload_q_head = (head + 1) % SCALE_UPLOAD_QUEUE_SIZE;
+	__sync_fetch_and_add(&s_scale_upload_q_count, 1);
+	return true;
+}
+
+static bool scale_upload_queue_pop_snapshot(ScaleSnapshot *out_snapshot)
+{
+	uint32_t count = __sync_fetch_and_add(&s_scale_upload_q_count, 0);
+	if (count == 0) {
+		return false;
+	}
+	uint32_t tail = s_scale_upload_q_tail;
+	memcpy(out_snapshot, &s_scale_upload_queue[tail], sizeof(*out_snapshot));
+	__sync_synchronize();
+	s_scale_upload_q_tail = (tail + 1) % SCALE_UPLOAD_QUEUE_SIZE;
+	__sync_fetch_and_sub(&s_scale_upload_q_count, 1);
+	return true;
+}
 
 static void send_scale_read_request(uint8_t slave_addr, uint16_t reg_addr, uint16_t reg_count,
                                     uint8_t cmd, uint8_t tx_uart, const char *label)
@@ -1546,6 +1601,14 @@ static void init_register_map(void)
 	s_scale_upload_map_index = -1;
 	s_scale_trigger_inited = false;
 	s_scale_trigger_last = 0;
+	s_scale_upload_q_head = 0;
+	s_scale_upload_q_tail = 0;
+	s_scale_upload_q_count = 0;
+	s_scale_upload_q_drop = 0;
+	s_scale_snapshot_count = 0;
+	s_scale_snapshot_needed = false;
+	s_scale_snapshot_slave = 0;
+	s_scale_snapshot_cmd = 0;
 
 	for (int i = 0; i < haas_device_num && i < MAX_REGISTER_MAP_SIZE; i++) {
 		char item_name[20];
@@ -1628,6 +1691,30 @@ static void init_register_map(void)
 	}
 
 	dbg_printf("[Modbus Init] Pre-allocated %d storage slots in order\n", g_register_map_count);
+
+	if (s_scale_upload_map_index >= 0 && s_scale_upload_map_index < g_register_map_count) {
+		RegisterMap *base = &g_register_map[s_scale_upload_map_index];
+		uint16_t snapshot_start_reg = 0x0070;
+		s_scale_snapshot_count = 0;
+		s_scale_snapshot_slave = base->slave_addr;
+		s_scale_snapshot_cmd = base->cmd;
+		for (int i = 0; i < g_register_map_count; i++) {
+			const RegisterMap *map = &g_register_map[i];
+			if (!map->enabled) {
+				continue;
+			}
+			if (map->slave_addr != base->slave_addr || map->cmd != base->cmd) {
+				continue;
+			}
+			if (map->reg_addr < snapshot_start_reg) {
+				continue;
+			}
+			if (s_scale_snapshot_count >= SCALE_SNAPSHOT_MAX_ITEMS) {
+				break;
+			}
+			s_scale_snapshot_indices[s_scale_snapshot_count++] = (uint8_t)i;
+		}
+	}
 }
 
 static void ensure_register_map_initialized(void)
@@ -1890,7 +1977,7 @@ static void store_register_data(uint8_t slave_addr, uint16_t reg_addr, uint16_t 
 		if (!s_scale_trigger_inited || value32 != s_scale_trigger_last) {
 			s_scale_trigger_last = value32;
 			s_scale_trigger_inited = true;
-			s_scale_upload_pending = true;
+			s_scale_snapshot_needed = true;
 		}
 	}
 	sync_register_to_rs485(map_index, slot, map, aggregated, value);
@@ -2139,6 +2226,28 @@ static bool parse_modbus_response(uint8_t channel, uint8_t *data, size_t len)
 			
 			// 存储数据
 			store_register_data(slave_addr, reg_addr, value, function_code);
+		}
+
+		if (dev_type == 4 && s_scale_snapshot_needed &&
+		    slave_addr == s_scale_snapshot_slave &&
+		    function_code == s_scale_snapshot_cmd &&
+		    s_scale_snapshot_count > 0) {
+			ScaleSnapshot snapshot;
+			memset(&snapshot, 0, sizeof(snapshot));
+			snapshot.count = s_scale_snapshot_count;
+			for (uint8_t i = 0; i < s_scale_snapshot_count; i++) {
+				uint8_t idx = s_scale_snapshot_indices[i];
+				HAAS_DEV_RS485 *dev = &g_haas_dev_rs485[idx];
+				snapshot.items[i].index = idx;
+				snapshot.items[i].value_valid = dev->value_valid;
+				snapshot.items[i].is_string = dev->is_string;
+				snapshot.items[i].value2 = dev->value2;
+				snapshot.items[i].value_numeric = dev->value_numeric;
+				memcpy(snapshot.items[i].value_text, dev->value_text,
+				       sizeof(snapshot.items[i].value_text));
+			}
+			scale_upload_queue_push_snapshot(&snapshot);
+			s_scale_snapshot_needed = false;
 		}
 	} 
 	else if (function_code == 0x01) {
@@ -2886,12 +2995,48 @@ void *data_main()
 		time_t now_time = time(NULL);
 
 		if (dev_type == 4) {
-			if (s_scale_upload_pending) {
+			ScaleSnapshot snapshot;
+			if (scale_upload_queue_pop_snapshot(&snapshot)) {
+				ScaleSnapshotItem backup_items[SCALE_SNAPSHOT_MAX_ITEMS];
+				uint8_t backup_count = snapshot.count;
+				if (backup_count > SCALE_SNAPSHOT_MAX_ITEMS) {
+					backup_count = SCALE_SNAPSHOT_MAX_ITEMS;
+				}
+				for (uint8_t i = 0; i < backup_count; i++) {
+					uint8_t idx = snapshot.items[i].index;
+					HAAS_DEV_RS485 *dev = &g_haas_dev_rs485[idx];
+					backup_items[i].index = idx;
+					backup_items[i].value_valid = dev->value_valid;
+					backup_items[i].is_string = dev->is_string;
+					backup_items[i].value2 = dev->value2;
+					backup_items[i].value_numeric = dev->value_numeric;
+					memcpy(backup_items[i].value_text, dev->value_text,
+					       sizeof(backup_items[i].value_text));
+
+					dev->value_valid = snapshot.items[i].value_valid;
+					dev->is_string = snapshot.items[i].is_string;
+					dev->value2 = snapshot.items[i].value2;
+					dev->value_numeric = snapshot.items[i].value_numeric;
+					memcpy(dev->value_text, snapshot.items[i].value_text,
+					       sizeof(dev->value_text));
+				}
+
 				mqtt_data_upload();
 				haas_mqtt_data_upload();
-				s_scale_upload_pending = false;
+
+				for (uint8_t i = 0; i < backup_count; i++) {
+					uint8_t idx = backup_items[i].index;
+					HAAS_DEV_RS485 *dev = &g_haas_dev_rs485[idx];
+					dev->value_valid = backup_items[i].value_valid;
+					dev->is_string = backup_items[i].is_string;
+					dev->value2 = backup_items[i].value2;
+					dev->value_numeric = backup_items[i].value_numeric;
+					memcpy(dev->value_text, backup_items[i].value_text,
+					       sizeof(dev->value_text));
+				}
+
 				s_mqtt_dataUpload_time = now_time;
-				printf("scale upload triggered by total count change\r\n");
+				printf("scale upload triggered by dev05 change\r\n");
 			}
 		} else if(now_time - s_mqtt_dataUpload_time >= s_mqtt_upload_interval_s)
 		{
@@ -2909,7 +3054,7 @@ void *data_main()
 	//	}
 #endif
 		//haas_data_display_cmd();
-		//sleep(2);
+		usleep(100 * 1000);
 	}
 	return 0;
 }
