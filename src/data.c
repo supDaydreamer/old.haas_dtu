@@ -1843,6 +1843,14 @@ static bool recalc_register_outputs(RegisterData *slot)
 		return true;
 	}
 
+	// 16 位有符号整型
+	if (slot->data_type == 7) {
+		int16_t raw16 = (int16_t)slot->reg_values[0];
+		slot->numeric_value = (double)raw16;
+		snprintf(slot->text_value, sizeof(slot->text_value), "%d", (int)raw16);
+		return true;
+	}
+
 	uint16_t raw16 = slot->reg_values[0];
 	slot->numeric_value = (double)raw16;
 	snprintf(slot->text_value, sizeof(slot->text_value), "%u", raw16);
