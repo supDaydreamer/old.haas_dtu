@@ -145,7 +145,7 @@ void *uart_rx_task(void *args)
 	uint8_t in_buf[UART_RX_MAX_LEN] = {0};
 	char tty_dev_buf[32] = {0};
 	uint32_t uart_index = (uint32_t)args;
-	uint32_t usleep_time = 100 * 1000;
+	uint32_t usleep_time = 10 * 1000;
 
 	snprintf(tty_dev_buf, sizeof(tty_dev_buf), "%s%u", TTY_DEV_PREFIX, uart_index);
 
@@ -167,10 +167,10 @@ void *uart_rx_task(void *args)
 	BFMSG_BOX_HANDLE box_handle = bfmsg_box_init(UART_MSG_BOX_DEEP);
 	if (uart_index == 1) {
 		g_uart1_rx_box_handle = box_handle;
-		usleep_time = 200 * 1000;
+		usleep_time = 10 * 1000;
 	} else if (uart_index == 2) {
 		g_uart2_rx_box_handle = box_handle;
-		usleep_time = 200 * 1000;
+		usleep_time = 10 * 1000;
 	}
 
 	while (1) {

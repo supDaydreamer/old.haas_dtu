@@ -31,6 +31,10 @@ static uint64_t now_ms(void)
 	return (uint64_t)tv.tv_sec * 1000 + (uint64_t)(tv.tv_usec / 1000);
 }
 
+// 12 个从站需要在一个 3 秒采集窗口内顺序完成轮询。
+#define MODBUS_RESPONSE_TIMEOUT_MS 200
+#define MODBUS_INTER_FRAME_DELAY_US (10 * 1000)
+
 uint16_t DATA_FUNCTION_INTERVAL_S = 300;
 
 uint16_t measure_value = 0;
@@ -2293,8 +2297,8 @@ printf("uart1 send data is:");
 		device_no = i+1;
 		g_haas_dev_rs485[i].index = i+1;
 
+		// 普通 Modbus 轮询通过 UART1 连接 RS485 从机。
 		uint8_t tx_uart = 1;
-		//uint8_t tx_uart = (dev_type == 2 || dev_type == 1) ? 1 : 2;
 		bool locked = false;
 		for (int retry = 0; retry < 10; retry++) {
 			if (tx_uart >= 1 && tx_uart <= 2 && s_uart_control_pending[tx_uart]) {
@@ -2324,18 +2328,8 @@ printf("uart1 send data is:");
 		s_send_data[6] = crc & 0xFF;
 		s_send_data[7] = crc >> 8;
 		
-		// 发送数据
-		printf("Device[%d] Modbus CMD=0x%02X (uart%u): ", i+1, g_haas_dev_rs485[i].cmd, tx_uart);
-		uart_tx(tx_uart, s_send_data, 8);
-		printf("uart%u send data is:", tx_uart);
-		for(int j=0; j<8; j++) 
-		{
-			printf("%02X ", s_send_data[j]);
-		}
-		printf("\r\n");
-		
-		// 记录待匹配请求，便于响应进入 store_register_data
-		ModbusRequest req = {
+			// 记录待匹配请求，便于响应进入 store_register_data
+			ModbusRequest req = {
 			.slave_addr = g_haas_dev_rs485[i].dev_add,
 			.function_code = g_haas_dev_rs485[i].cmd,
 			.channel = tx_uart,
@@ -2343,8 +2337,18 @@ printf("uart1 send data is:");
 			.reg_count = (g_haas_dev_rs485[i].data_len == 0) ? 1 : g_haas_dev_rs485[i].data_len,
 			.timestamp = time(NULL),
 			.is_valid = true
-		};
-		add_pending_request(&req);
+			};
+			add_pending_request(&req);
+
+			// 先登记请求再发送，避免快速从机响应到达时尚无匹配项
+			printf("Device[%d] Modbus CMD=0x%02X (uart%u): ", i+1, g_haas_dev_rs485[i].cmd, tx_uart);
+			uart_tx(tx_uart, s_send_data, 8);
+			printf("uart%u send data is:", tx_uart);
+			for(int j=0; j<8; j++)
+			{
+				printf("%02X ", s_send_data[j]);
+			}
+			printf("\r\n");
 		
 		// 等待响应
 		uint64_t start_ms = now_ms();
@@ -2356,7 +2360,7 @@ printf("uart1 send data is:");
 				s_waiting_haas_th = false;
 				break;
 			}
-			if (now_ms() - start_ms >= 1000) {
+			if (now_ms() - start_ms >= MODBUS_RESPONSE_TIMEOUT_MS) {
 				s_waiting_haas_th = false;
 				break;
 			}
@@ -2364,12 +2368,13 @@ printf("uart1 send data is:");
 		}
 
 		uart_channel_unlock(tx_uart);
-		usleep(500 * 1000);
+		usleep(MODBUS_INTER_FRAME_DELAY_US);
 	}
 #endif
 
 	if (dev_type == 1) {
-		uint8_t tx_uart = (dev_type == 2 || dev_type == 1) ? 1 : 2;
+		// 风机 Modbus 轮询也使用 UART2，保持本函数的通信通道一致。
+		uint8_t tx_uart = 2;
 		bool locked = false;
 		for (int retry = 0; retry < 10; retry++) {
 			if (tx_uart >= 1 && tx_uart <= 2 && s_uart_control_pending[tx_uart]) {
