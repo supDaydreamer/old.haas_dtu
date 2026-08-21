@@ -26,9 +26,12 @@
 #define MODBUS_FRAME_TIMEOUT_MS 200    // Modbus帧超时时间(毫秒)
 #define MAX_PENDING_REQUESTS    10     // 最大待匹配请求数量
 #define REGISTER_VALUE_MAX_BYTES 32    // 单条监测项允许的最大原始字节数
+#define TRIGGER_SIGNAL_MAX_BYTES 64
+#define TRIGGER_GPIO_DEFAULT 36
 ////////////////////////////////////////////////////////////////////////////////////////////
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <time.h>
 
 typedef enum {
@@ -307,6 +310,10 @@ void on_haas_time_receive(HAAS_TIME haas_time);
 void energy_init();
 void energy_read();
 void haas_data_read();
+bool trigger_signal_is_enabled(void);
+bool trigger_wait_next(uint32_t *trigger_id);
+void trigger_signal_feed(const uint8_t *data, size_t len);
+bool haas_data_read_triggered(uint32_t trigger_id);
 void haas_data_payload_dump();
 int get_fan_value(void);
 void haas_data_detect();

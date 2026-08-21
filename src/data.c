@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+#include <fcntl.h>
+#include <errno.h>
 #include <sys/time.h>
 #include "common.h"
 #include "data.h"
@@ -34,6 +37,7 @@ static uint64_t now_ms(void)
 // 12 个从站需要在一个 3 秒采集窗口内顺序完成轮询。
 #define MODBUS_RESPONSE_TIMEOUT_MS 200
 #define MODBUS_INTER_FRAME_DELAY_US (10 * 1000)
+#define MODBUS_TRIGGER_DEADLINE_MS 2800
 
 uint16_t DATA_FUNCTION_INTERVAL_S = 300;
 
@@ -51,6 +55,25 @@ bool g_energy_window_value_ready = false;
 uint8_t g_energy_window_publish_mask = 0;
 static bool s_window_capture_requested = false;
 static uint32_t s_mqtt_upload_interval_s = DATA_MQTT_INTERVAL_S;
+
+static bool s_trigger_mode_enabled = false;
+static bool s_trigger_gpio_mode = false;
+static int s_trigger_gpio = TRIGGER_GPIO_DEFAULT;
+static int s_trigger_active_level = 1;
+static int s_trigger_poll_ms = 10;
+static int s_trigger_debounce_ms = 50;
+static uint8_t s_trigger_frame[TRIGGER_SIGNAL_MAX_BYTES];
+static size_t s_trigger_frame_len = 0;
+static uint8_t s_trigger_match_buf[TRIGGER_SIGNAL_MAX_BYTES];
+static size_t s_trigger_match_len = 0;
+static pthread_mutex_t s_trigger_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t s_trigger_cond = PTHREAD_COND_INITIALIZER;
+static uint32_t s_trigger_generation = 0;
+static uint32_t s_trigger_consumed_generation = 0;
+static uint32_t s_active_trigger_generation = 0;
+static uint64_t s_active_trigger_deadline_ms = 0;
+static bool s_trigger_capture_active = false;
+static pthread_t s_trigger_gpio_thread;
 
 static char read_energy_type_cmd[] = {0x05,0x03,0x10,0x00,0x00,0x04,0x41,0x4d};
 static char read_energy_params_cmd[] = {0x05,0x03,0x10,0x10,0x00,0x0B,0x00,0x8C};
@@ -126,6 +149,257 @@ static void update_energy_window(uint16_t reg_addr, uint8_t cmd, const RegisterD
 static void send_clear_frames(void);
 
 static void filter_value2_by_delta(uint8_t index, HAAS_DEV_RS485 *dev);
+
+static void trigger_raise_event(void)
+{
+	pthread_mutex_lock(&s_trigger_mutex);
+	s_trigger_generation++;
+	pthread_cond_signal(&s_trigger_cond);
+	pthread_mutex_unlock(&s_trigger_mutex);
+}
+
+static void trigger_disable_gpio_mode(void)
+{
+	pthread_mutex_lock(&s_trigger_mutex);
+	s_trigger_gpio_mode = false;
+	s_trigger_mode_enabled = false;
+	pthread_cond_broadcast(&s_trigger_cond);
+	pthread_mutex_unlock(&s_trigger_mutex);
+}
+
+static int gpio_read_value(int fd)
+{
+	char value = '0';
+	if (lseek(fd, 0, SEEK_SET) < 0 || read(fd, &value, 1) != 1) {
+		return -1;
+	}
+	return value == '1' ? 1 : (value == '0' ? 0 : -1);
+}
+
+static void *gpio_trigger_task(void *arg)
+{
+	(void)arg;
+	char path[64];
+	char gpio_num[16];
+	int export_fd = open("/sys/class/gpio/export", O_WRONLY);
+	if (export_fd >= 0) {
+		int n = snprintf(gpio_num, sizeof(gpio_num), "%d", s_trigger_gpio);
+		(void)write(export_fd, gpio_num, (size_t)n);
+		close(export_fd);
+	} else if (errno != EBUSY) {
+		printf("[Trigger GPIO] cannot open export: %s\n", strerror(errno));
+		trigger_disable_gpio_mode();
+		return NULL;
+	}
+
+	snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/direction", s_trigger_gpio);
+	int direction_fd = open(path, O_WRONLY);
+	if (direction_fd < 0) {
+		printf("[Trigger GPIO] open direction failed for GPIO%d: %s\n", s_trigger_gpio, strerror(errno));
+		trigger_disable_gpio_mode();
+		return NULL;
+	}
+	(void)write(direction_fd, "in", 2);
+	close(direction_fd);
+
+	snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/value", s_trigger_gpio);
+	int value_fd = open(path, O_RDONLY);
+	if (value_fd < 0) {
+		printf("[Trigger GPIO] open value failed for GPIO%d: %s\n", s_trigger_gpio, strerror(errno));
+		trigger_disable_gpio_mode();
+		return NULL;
+	}
+
+	int stable = gpio_read_value(value_fd);
+	if (stable < 0) {
+		printf("[Trigger GPIO] initial read failed for GPIO%d\n", s_trigger_gpio);
+		trigger_disable_gpio_mode();
+		close(value_fd);
+		return NULL;
+	}
+	bool armed = (stable != s_trigger_active_level);
+	int candidate = stable;
+	uint64_t candidate_since = now_ms();
+	printf("[Trigger GPIO] GPIO%d input ready, initial=%d active=%d\n",
+	       s_trigger_gpio, stable, s_trigger_active_level);
+
+	while (s_trigger_gpio_mode) {
+		int raw = gpio_read_value(value_fd);
+		if (raw >= 0 && raw != candidate) {
+			candidate = raw;
+			candidate_since = now_ms();
+		}
+		if (raw >= 0 && raw == candidate && candidate != stable &&
+		    now_ms() - candidate_since >= (uint64_t)s_trigger_debounce_ms) {
+			int previous = stable;
+			stable = candidate;
+			if (stable != s_trigger_active_level) {
+				armed = true;
+			} else if (armed && previous != s_trigger_active_level) {
+				armed = false;
+				printf("[Trigger GPIO] GPIO%d active edge\n", s_trigger_gpio);
+				trigger_raise_event();
+			}
+		}
+		usleep((useconds_t)(s_trigger_poll_ms * 1000));
+	}
+	close(value_fd);
+	return NULL;
+}
+
+static int hex_digit_value(char c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+static void load_trigger_signal_config(void)
+{
+	char mode[16] = {0};
+	const char *mode_raw = GetIniKeyString("config", "trigger_mode", FILENAME);
+	if (mode_raw != NULL) {
+		snprintf(mode, sizeof(mode), "%s", mode_raw);
+	}
+	s_trigger_gpio_mode = (strcmp(mode, "gpio") == 0 || strcmp(mode, "GPIO") == 0 || atoi(mode) == 1);
+	if (s_trigger_gpio_mode) {
+		s_trigger_gpio = GetIniKeyInt("config", "trigger_gpio", FILENAME);
+		if (s_trigger_gpio <= 0) s_trigger_gpio = TRIGGER_GPIO_DEFAULT;
+		s_trigger_active_level = GetIniKeyInt("config", "trigger_active_level", FILENAME);
+		if (s_trigger_active_level != 0 && s_trigger_active_level != 1) s_trigger_active_level = 1;
+		s_trigger_poll_ms = GetIniKeyInt("config", "trigger_poll_ms", FILENAME);
+		if (s_trigger_poll_ms < 1 || s_trigger_poll_ms > 1000) s_trigger_poll_ms = 10;
+		s_trigger_debounce_ms = GetIniKeyInt("config", "trigger_debounce_ms", FILENAME);
+		if (s_trigger_debounce_ms < 0 || s_trigger_debounce_ms > 5000) s_trigger_debounce_ms = 50;
+		s_trigger_mode_enabled = true;
+		if (pthread_create(&s_trigger_gpio_thread, NULL, gpio_trigger_task, NULL) == 0) {
+			pthread_detach(s_trigger_gpio_thread);
+			printf("[Trigger GPIO] enabled: gpio=%d active=%d poll=%dms debounce=%dms\n",
+			       s_trigger_gpio, s_trigger_active_level, s_trigger_poll_ms, s_trigger_debounce_ms);
+		} else {
+			printf("[Trigger GPIO] failed to start GPIO monitor; using periodic mode\n");
+			s_trigger_gpio_mode = false;
+			s_trigger_mode_enabled = false;
+		}
+		return;
+	}
+
+	const char *raw = GetIniKeyString("config", "trigger_signal", FILENAME);
+	s_trigger_mode_enabled = false;
+	s_trigger_frame_len = 0;
+	if (raw == NULL || raw[0] == '\0' || strcmp(raw, "0") == 0) {
+		dbg_printf(">>> trigger_signal disabled; using periodic mode\n");
+		return;
+	}
+
+	size_t raw_len = strlen(raw);
+	while (raw_len > 0 && (raw[raw_len - 1] == '\r' || raw[raw_len - 1] == '\n')) {
+		raw_len--;
+	}
+	if ((raw_len & 1U) != 0 || raw_len > TRIGGER_SIGNAL_MAX_BYTES * 2U) {
+		printf("[Trigger] invalid trigger_signal length; using periodic mode\n");
+		return;
+	}
+	for (size_t i = 0; i < raw_len / 2; i++) {
+		int hi = hex_digit_value(raw[i * 2]);
+		int lo = hex_digit_value(raw[i * 2 + 1]);
+		if (hi < 0 || lo < 0) {
+			printf("[Trigger] invalid trigger_signal hex; using periodic mode\n");
+			s_trigger_frame_len = 0;
+			return;
+		}
+		s_trigger_frame[i] = (uint8_t)((hi << 4) | lo);
+	}
+	s_trigger_frame_len = raw_len / 2;
+	for (size_t i = 0; i < s_trigger_frame_len; i++) {
+		if (s_trigger_frame[i] != 0) {
+			s_trigger_mode_enabled = true;
+			break;
+		}
+	}
+	if (s_trigger_mode_enabled) {
+		printf("[Trigger] enabled, frame length=%u\n", (unsigned int)s_trigger_frame_len);
+	} else {
+		dbg_printf(">>> trigger_signal is all zero; using periodic mode\n");
+	}
+}
+
+bool trigger_signal_is_enabled(void)
+{
+	return s_trigger_mode_enabled;
+}
+
+bool trigger_wait_next(uint32_t *trigger_id)
+{
+	if (!s_trigger_mode_enabled || trigger_id == NULL) return false;
+	pthread_mutex_lock(&s_trigger_mutex);
+	while (s_trigger_mode_enabled && s_trigger_generation == s_trigger_consumed_generation) {
+		pthread_cond_wait(&s_trigger_cond, &s_trigger_mutex);
+	}
+	if (!s_trigger_mode_enabled) {
+		pthread_mutex_unlock(&s_trigger_mutex);
+		return false;
+	}
+	s_trigger_consumed_generation = s_trigger_generation;
+	*trigger_id = s_trigger_consumed_generation;
+	pthread_mutex_unlock(&s_trigger_mutex);
+	return true;
+}
+
+void trigger_signal_feed(const uint8_t *data, size_t len)
+{
+	if (!s_trigger_mode_enabled || data == NULL || len == 0) return;
+	pthread_mutex_lock(&s_trigger_mutex);
+	for (size_t n = 0; n < len; n++) {
+		if (s_trigger_match_len < sizeof(s_trigger_match_buf)) {
+			s_trigger_match_buf[s_trigger_match_len++] = data[n];
+		} else {
+			memmove(s_trigger_match_buf, s_trigger_match_buf + 1, sizeof(s_trigger_match_buf) - 1);
+			s_trigger_match_buf[sizeof(s_trigger_match_buf) - 1] = data[n];
+		}
+		if (s_trigger_match_len >= s_trigger_frame_len && s_trigger_frame_len > 0 &&
+		    memcmp(s_trigger_match_buf + s_trigger_match_len - s_trigger_frame_len,
+		           s_trigger_frame, s_trigger_frame_len) == 0) {
+			trigger_raise_event();
+		}
+	}
+	/* Keep only the longest useful suffix so a frame split across reads is retained. */
+	if (s_trigger_match_len > s_trigger_frame_len && s_trigger_frame_len > 0) {
+		memmove(s_trigger_match_buf,
+		        s_trigger_match_buf + s_trigger_match_len - s_trigger_frame_len,
+		        s_trigger_frame_len);
+		s_trigger_match_len = s_trigger_frame_len;
+	}
+	pthread_mutex_unlock(&s_trigger_mutex);
+}
+
+static bool trigger_capture_aborted(void)
+{
+	if (!s_trigger_capture_active) return false;
+	bool aborted;
+	pthread_mutex_lock(&s_trigger_mutex);
+	aborted = (s_trigger_generation != s_active_trigger_generation);
+	pthread_mutex_unlock(&s_trigger_mutex);
+	return aborted || now_ms() >= s_active_trigger_deadline_ms;
+}
+
+static void reset_trigger_capture_values(void)
+{
+	for (int i = 0; i < MAX_PENDING_REQUESTS; i++) {
+		g_pending_requests[i].is_valid = false;
+	}
+	for (int i = 0; i < g_register_map_count; i++) {
+		g_register_data[i].is_valid = false;
+		g_register_data[i].reg_ready_mask = 0;
+		g_register_data[i].raw_len = 0;
+		g_register_data[i].text_value[0] = '\0';
+		if (i < (int)(sizeof(g_haas_dev_rs485) / sizeof(g_haas_dev_rs485[0]))) {
+			g_haas_dev_rs485[i].value_valid = 0;
+			g_haas_dev_rs485[i].value_text[0] = '\0';
+		}
+	}
+}
 
 static float read_gain_from_config(const char *key, float default_gain)
 {
@@ -940,6 +1214,7 @@ void data_init()
 	if (0 == access(FILENAME, F_OK)) {
 		dev_type = (uint8_t)GetIniKeyInt("config", "dev_type", FILENAME);
 		dbg_printf(">>> read dev_type: %d\n", dev_type);
+		load_trigger_signal_config();
 
 		g_energy_vt_gain = read_gain_from_config("vt_gain", 1.0f);
 		g_energy_ct_gain = read_gain_from_config("ct_gain", 1.0f);
@@ -961,6 +1236,7 @@ void data_init()
 		dbg_printf(">>> read haas_dev_num: %u\n", haas_device_num);
 	} else {
 		dbg_printf(">>> no device.conf, dev_type default 0\n");
+		s_trigger_mode_enabled = false;
 		DATA_FUNCTION_INTERVAL_S = DATA_MQTT_INTERVAL_S;
 		s_mqtt_upload_interval_s = DATA_MQTT_INTERVAL_S;
 	}
@@ -1344,6 +1620,7 @@ void humi_device_control(uint8_t cmd)
 void on_uart_1_read(uint8_t *data, size_t len)
 {
 	uart_rx_publish(1, store_buf(data, len));
+	trigger_signal_feed(data, len);
 
 	dbg_printf("======= uart 1 read %u: ======\n", (unsigned int)len);
 	for (size_t i = 0; i < len; i++) {
@@ -2250,7 +2527,7 @@ void haas_data_detect(void)
 }
 
 //////////////////////////////////////////////////////////////
-void haas_data_read(void)
+static void haas_data_read_internal(void)
 {
 	uint16_t crc = 0;
 	uint8_t *send_data_p = NULL;
@@ -2294,6 +2571,9 @@ printf("uart1 send data is:");
 #if 1
 	for(int i=0;i<haas_device_num;i++)
 	{
+		if (s_trigger_mode_enabled && trigger_capture_aborted()) {
+			break;
+		}
 		device_no = i+1;
 		g_haas_dev_rs485[i].index = i+1;
 
@@ -2301,6 +2581,9 @@ printf("uart1 send data is:");
 		uint8_t tx_uart = 1;
 		bool locked = false;
 		for (int retry = 0; retry < 10; retry++) {
+			if (s_trigger_mode_enabled && trigger_capture_aborted()) {
+				break;
+			}
 			if (tx_uart >= 1 && tx_uart <= 2 && s_uart_control_pending[tx_uart]) {
 				usleep(50 * 1000);
 				continue;
@@ -2310,6 +2593,9 @@ printf("uart1 send data is:");
 			usleep(50 * 1000);
 		}
 		if (!locked) {
+			if (s_trigger_mode_enabled && trigger_capture_aborted()) {
+				break;
+			}
 			dbg_printf("[Modbus Poll] uart%u busy, skip dev%02d this round\n", tx_uart, i + 1);
 			continue;
 		}
@@ -2355,6 +2641,10 @@ printf("uart1 send data is:");
 		s_waiting_haas_th = true;
 		while (s_waiting_haas_th) 
 		{
+			if (s_trigger_mode_enabled && trigger_capture_aborted()) {
+				s_waiting_haas_th = false;
+				break;
+			}
 			if (tx_uart >= 1 && tx_uart <= 2 && s_uart_control_pending[tx_uart]) {
 				dbg_printf("[Modbus Poll] uart%u interrupted by control, exit wait\n", tx_uart);
 				s_waiting_haas_th = false;
@@ -2407,6 +2697,30 @@ printf("uart1 send data is:");
 
 		uart_channel_unlock(tx_uart);
 	}
+}
+
+void haas_data_read(void)
+{
+	s_trigger_capture_active = false;
+	haas_data_read_internal();
+}
+
+bool haas_data_read_triggered(uint32_t trigger_id)
+{
+	if (!s_trigger_mode_enabled) return false;
+	ensure_register_map_initialized();
+	reset_trigger_capture_values();
+	pthread_mutex_lock(&s_trigger_mutex);
+	s_active_trigger_generation = trigger_id;
+	s_active_trigger_deadline_ms = now_ms() + MODBUS_TRIGGER_DEADLINE_MS;
+	pthread_mutex_unlock(&s_trigger_mutex);
+	s_trigger_capture_active = true;
+	haas_data_read_internal();
+	pthread_mutex_lock(&s_trigger_mutex);
+	bool cancelled = (s_trigger_generation != trigger_id);
+	pthread_mutex_unlock(&s_trigger_mutex);
+	s_trigger_capture_active = false;
+	return !cancelled;
 }
 
 void haas_data_save(void)
@@ -2694,7 +3008,7 @@ void *data_main()
 #if 1
 		time_t now_time = time(NULL);
 
-		if(now_time - s_mqtt_dataUpload_time >= s_mqtt_upload_interval_s)
+		if(!trigger_signal_is_enabled() && now_time - s_mqtt_dataUpload_time >= s_mqtt_upload_interval_s)
 		{
 			mqtt_data_upload();
 			haas_mqtt_data_upload();

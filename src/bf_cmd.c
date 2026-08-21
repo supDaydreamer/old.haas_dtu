@@ -800,6 +800,19 @@ void *cmd_main(void *args)
 	while(1) {
 		get_Tywifi_status();
 		time_t now_time = time(NULL);
+		if (trigger_signal_is_enabled()) {
+			uint32_t trigger_id = 0;
+			if (trigger_wait_next(&trigger_id)) {
+				if (haas_data_read_triggered(trigger_id)) {
+					mqtt_data_upload();
+					haas_mqtt_data_upload();
+					printf("[Trigger] capture %u uploaded\n", trigger_id);
+				} else {
+					printf("[Trigger] capture %u cancelled by newer trigger\n", trigger_id);
+				}
+			}
+			continue;
+		}
 		if (RS485_type == 1) {
 			haas_data_detect();
 			sleep(1);
